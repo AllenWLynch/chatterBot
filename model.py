@@ -358,8 +358,6 @@ class TransformerModel(tf.keras.Model):
 
             return logits, mask
         
-
-
 class Transformer():
 
     def __init__(self, num_encoder_classes, num_decoder_classes, d_model = 512, num_layers = 6, num_heads = 8, dropout = 0.1, dff = 2048):
