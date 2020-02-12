@@ -19,7 +19,7 @@ Next, I plan to build my selective model on top of the generative transformer us
 Additionally, I plan to use relative positional embeddings in the attention layer, which will be dependent on the features of distance between two word representations, as well as speaker embeddings concatenated with word embeddings, so the chatbot may learn multiple roles or personalities.
 
 Lastly, word embeddings were contructed using gensim's word2vec implementation, which featurized 8000 subwords found using Google's sentencepiece unigram encoder implementation. The architecture specifications are shown below:
-<br><img src="readme_materials/architecture.png" height=750><br>
+<br><img src="readme_materials/architecture.png" height=500><br>
 Figure 1. Chatbot architecture.<br>
 
 ## Data
