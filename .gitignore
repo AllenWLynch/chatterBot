@@ -1,3 +1,6 @@
 data/
 __pycache__/
 spark-warehouse/
+spm/
+w2v_embeddings.npy
+v2v_model
