@@ -12,14 +12,14 @@ For example, the generative chatbot is essentially a language model, the underpi
 
 ## Architecture
 
-The generative portion of my chatbot follows a typical Transformer neural architecture set-up, with an encoder and decoder block. Recent work on Google's Meena chatbot showed a more powerful decoder is more important than the encoder, so I may try their uneven design. This portion of the model will by trained on the corpus first using crossentropy loss on 8000 classes representing subwords in the corpus.
+My architecture extends the successful QANet architecture, which relies on a shared representation module for the context and response (since they are the same language in QA and chatbot applications), followed by a decoder module to produce distributions over the embeddings for softmax logits. The shared embeddings, CNN+highway, which learns common n-grams from subword embeddings, and low-level transformer layers reduce parameters needed to perform similar functions in the context and response flows.
 
-Next, I plan to build my selective model on top of the generative transformer using the outputs of the encoder and decoder blocks as features. These blocks will already be trained as a language model, so their gradients will be frozen. I am still debating the architecture for the selective network, which must produce two feature vectors from the tranformer's outputs. One option is averaging the generator outputs over time, then running those through dense layers. Another approach might be an attention layer, or even perhaps more transformer layers. This appended network will be trained with triplet loss on common responses.
+In addition to the generative module, my selective model will also use the shared representation module as input. The selective model will be composed of transformer layers, and the output context/response embedding vectors will be averages of the transformer output vectors, as in S-BERT, a powerful sentence comparison architecture. These embedding vectors will be compared with cosine similarity, with likely context-response pairs being closer in cosine similarity than unlikely pairs. The triplet loss for the selective model and crossentropy loss for the generative model will be trained jointly, with a *(context, response)* pair sampled from the dataset used as a positive example, and a negative sample selected from a buffer of past samples.
 
 Additionally, I plan to use relative positional embeddings in the attention layer, which will be dependent on the features of distance between two word representations, as well as speaker embeddings concatenated with word embeddings, so the chatbot may learn multiple roles or personalities.
 
 Lastly, word embeddings were contructed using gensim's word2vec implementation, which featurized 8000 subwords found using Google's sentencepiece unigram encoder implementation. The architecture specifications are shown below:
-<br><img src="readme_materials/architecture.png" height=500><br>
+<br><img src="readme_materials/architecture.png" width=750><br>
 Figure 1. Chatbot architecture.<br>
 
 ## Data
@@ -33,6 +33,8 @@ Figure 2. Conversation DAG and topological orderings discovered.
 <br>
 
 My BFS algorithm was implemented in Spark SQL to efficiently construct nearly 1 million conversations from the 3 million tweets. The process took less than 5 minutes, so this could easily be expanded to more tweets if I found another database. The sequences this yielded were then broken into 5-tweet sub-sequences for training. At inference time, an entire conversation may be used for context because my relative positional encoding scheme is expandable to any context length, but this is not practical for training when number of examples is more important than learning very long-range dependencies. 
+
+Figure 3. SQL BFS algorithm.
 
 ### Subword Embeddings
 
