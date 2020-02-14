@@ -20,7 +20,6 @@ def dot_product_attn(q, k, v, len_q, additional_encoding, mask = None):
     
     return context
 
-
 # # Multihead Projection
 
 class MultiHeadProjection(tf.keras.layers.Layer):
@@ -49,8 +48,6 @@ class MultiHeadProjection(tf.keras.layers.Layer):
         output = tf.matmul(X, self.W)
         
         return output
-
-
 
 class AttentionLayer(tf.keras.layers.Layer):
    
@@ -123,9 +120,8 @@ class FCNNLayer(tf.keras.layers.Layer):
         return self.dropout(self.dense2(self.dense1(X)), training = training)
 
 
-# #  Encoder Layer
-
-class TransformerEncoder(tf.keras.layers.Layer):
+#Encoder Layer
+class EncoderLayer(tf.keras.layers.Layer):
     
     def __init__(self, dff = 1024, heads = 8, fcnn_dropout = 0.1, attn_dropout = 0.1, **kwargs):
         super().__init__(**kwargs)
@@ -159,7 +155,7 @@ class TransformerEncoder(tf.keras.layers.Layer):
         
         return X
 
-class TransformerDecoder(TransformerEncoder):
+class DecoderLayer(TransformerEncoder):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -186,8 +182,7 @@ class TransformerDecoder(TransformerEncoder):
                 
         return X
 
-
-# # Position Encoding Layer
+# Position Encoding Layer
 class RelativePositionalEncoder(tf.keras.layers.Layer):
 
     def __init__(self, max_relative_distance, clipping_fn = None, **kwargs):
@@ -227,41 +222,73 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
         RPEs = tf.einsum('mhtd,tds->mhts', attnQ, embeddings)
         return RPEs
 
+class HighwayLayer(tf.keras.layers.Layer):
 
-class SpeakerEncoder(tf.keras.layers.Layer):
-
-    def __init__(self, num_speakers, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        
 
     def build(self, input_shape):
-        
-        assert(len(input_shape)) == 4, 'Input to positional encoder must be a attention-matrix (Q,K,or V) with shape: (m, h, tx, d)'
-        #print(input_shape)
+        self.d_model = input_shape[-1]
+        self.Wt = self.add_weight(shape = (self.d_model, self.d_model), name = 'Wt', dtype = 'float32')
+        self.bt = self.add_weight(shape = (1, self.d_model), name = 'bt', dtype = 'float32')
 
-        embeddings_shape = (2 * (self.max_relative_distance - 1) + 1, d)
-        #print(embeddings_shape)
-        self.pe = self.add_weight(shape = embeddings_shape, name = 'positional_embeddings')
-        #self.pe_matrix = tf.gather(self.pe, relative_distances)
+    def call(self, X):
+        Tx = tf.math.sigmoid(tf.matmul(X, self.Wt) + self.bt)
+        return tf.math.multiply(X, Tx) + tf.math.multiply(X, (1.0 - Tx))
 
-    def call(self, attnQ, attnK):
-        t1 = attnQ.get_shape()[-2]
-        t2 = attnK.get_shape()[-2]
+class CausalSeperable1DConv(tf.keras.layers.Layer):
 
-        t1_ = tf.expand_dims(tf.range(t1), -1)
-        t2_ = tf.expand_dims(tf.range(t2), -1)
+    def __init__(self, output_depth, kernel_width, **kwargs):
+        super().__init__(**kwargs)
+        self.output_depth = output_depth
+        self.kernel_width = kernel_width
 
-        relative_distances = (t1_ - tf.transpose(t2_))
-        relative_distances = self.clipping_fn(relative_distances, self.max_relative_distance)
-        relative_distances = relative_distances + tf.min(self.max_relative_distance + 1, tf.maximum(t1, t2)) - 1
-        #Q (m,h,t1,d)
-        #a (t1,t2,d)
-        embeddings = tf.gather(self.pe, relative_distances)
-        #a(t1,d,t2)
-        embeddings = tf.transpose(embeddings, perm = [0,2,1])
-        #(m,h,t1,d) dot (t1,d,t2) => (m,h,t1,t2)
-        RPEs = tf.einsum('mhtd,tds->mhts', attnQ, embeddings)
-        return RPEs
+    def build(self,input_shape):
+        assert(len(input_shape) == 3), 'Must be (m, Tx, d_model')
+        m, w, nc = input_shape
+
+        self.seperable_conv = tf.keras.layers.SeparableConv2D(self.output_depth, (1, self.kernel_width), 
+                strides = 1, padding = 'valid', activation = 'ReLU')
+
+        self.padding = tf.keras.layers.ZeroPadding1D((self.kernel_width - 1), 0))
+
+    def call(self, X):
+        X = self.padding(X)
+        #m, w, nc -> m, h = 1, w, nc
+        X = tf.expand_dims(X, 1)
+        X = self.seperable_conv(X)
+        X = tf.squeeze(X)
+        return X
+
+def EmbeddingCNNStack(num_classes, d_model, output_dim, kernel_width):
+    return tf.keras.Sequential([
+        tf.keras.layers.Embedding(num_classes, d_model),
+        CausalSeperable1DConv(output_dim, kernel_width),
+        HighwayLayer(),
+        CausalSeperable1DConv(output_dim, kernel_width),
+        HighwayLayer(),
+    ])
+
+class Encoder(tf.keras.layers.Layer):
+
+    def __init__(self, num_classes, d_model = 512, num_layers = 6, num_heads = 8, embedding_dropout = 0.1, 
+                attn_dropout = 0.1, fcnn_dropout = 0.1, dff = 1024, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.d_model = d_model
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.fcnn_dropout = fcnn_dropout
+        self.attn_dropout = attn_dropout
+        self.dff = dff
+
+    def build(self, input_shape):
+        assert(len(input_shape) == 2), 'input should be (m, len_seq)'
+        self.embedding_layer = tf.keras.layers.Embedding(self.num_classes, self.d_model)
+        self.causal_conv_layer = tf.keras.layers.Conv1D()
+
+
+
 # # Encoder Stack
 
 def convert_embedding_mask(embedding_mask):

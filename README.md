@@ -12,13 +12,21 @@ For example, the generative chatbot is essentially a language model, the underpi
 
 ## Architecture
 
-BERT, or Bidirectional Encoder Representations from Transformers, demonstrated the ability of Transformers to output embeddings for upstream classification layers when induced by a special token in the input sequence, for instance ```[CLS]``` for class. I believe this functionality can be incorporated into a generative seq2seq Transformer to induce the output vector for similarity comparisons. This would allow the transformer to jointly learn generative and selective modeling, essentially training it to rate its own responses.
+My architecture extends the successful QANet architecture, which relies on a shared representation module for the context and response (since they are the same language in QA and chatbot applications), followed by a decoder module to produce distributions over the embeddings for softmax logits. The shared embeddings, CNN+highway, which learns common n-grams from subword embeddings, and low-level transformer layers reduce parameters needed to perform similar functions in the context and response flows.
 
-There are then two training objectvies. First, the selective modeling functionality will be trained using triplet loss, in which the model learns to embed contexts and responses in a joint n-dimensional space in which more appropriate context-response pairs are closer in that space. Second the generative functionality will try to maximize the probability of recreating the ground-truth response given a particular context. These losses may be minimized using the following formula:
+In addition to the generative module, my selective model will also use the shared representation module as input. The selective model will be composed of transformer layers, and the output context/response embedding vectors will be averages of the transformer output vectors, as in S-BERT, a powerful sentence comparison architecture. These embedding vectors will be compared with cosine similarity, with likely context-response pairs being closer in cosine similarity than unlikely pairs. The triplet loss for the selective model and crossentropy loss for the generative model will be trained jointly, with a *(context, response)* pair sampled from the dataset used as a positive example, and a negative sample selected from a buffer of past samples.
 
-L(context, response_true, response_false) = max(0, sim(E(context), D(response_true)) - sim(E(context), D(response_false)) + a) + log P(response_true | context)
+Additionally, I plan to use relative positional embeddings in the attention layer, which will be dependent on the features of distance between two word representations, as well as speaker embeddings concatenated with word embeddings, so the chatbot may learn multiple roles or personalities.
 
-where E is the encoder function, D is the decoder function, and a is the triplet loss scalar. The first equation shows the triplet loss on anchor, positive, and negative samples (context, response_true, response_false), while the second equation shows the maximization of the log-likelihood of generating the true response. The architecture is shown below:
+Lastly, word embeddings were contructed using gensim's word2vec implementation, which featurized 8000 subwords found using Google's sentencepiece unigram encoder implementation. The architecture specifications are shown below:
+<br><img src="readme_materials/architecture.png" width=750><br>
+Figure 1. Chatbot architecture.<br>
+
+## Data
+
+### Conversation Modeling
+
+The database I am using includes 3 million tweets from conversations between users and customer service accounts for major brands including Spotify, Apple, and Verizon. In long form, this database gives each tweet as a response to one or more other tweets. Furthermore, a tweet may be a response to multiple tweets from different users, or multiple tweets in series from the same user. All this makes Twitter conversations unexpectantly convoluted, and so I took to thinking of conversations as DAGs. Below is an example of interdependencies between tweets represented as a DAG, each edge being a response connection. Nodes A.1 and A.2 are tweets by the same user that were both responsed to by tweet C. My algorithm for generating topological orderings uses breadth-first search from root nodes and flattens layers of the graph to include single-user tweet series. Given the DAG in Figure 2, my algorithm finds the listed conversations chains.
 <br><br>
 <img src="readme_materials/architecture.png" height="500"><br>
 Figure 1. Transformer architecture.
@@ -30,29 +38,70 @@ Additionally, I plan to use relative positional embeddings in the attention laye
 
 ### Conversation Modeling
 
-The database I am using includes 3 million tweets from conversations between users and customer service accounts for major brands including Spotify, Apple, and Verizon. In long form, this database gives each tweet as a response to one or more other tweets. Furthermore, a tweet may be a response to multiple tweets from different users, or multiple tweets in series from the same user. All this makes Twitter conversations unexpectantly convoluted, and so I took to thinking of conversations as DAGs. Below is an example of interdependencies between tweets represented as a DAG, each edge being a response connection. Nodes A.1 and A.2 are tweets by the same user that were both responsed to by tweet C. My algorithm for generating topological orderings uses breadth-first search from root nodes and flattens layers of the graph to include single-user tweet series. Given the DAG in Figure 2, my algorithm finds the listed conversations chains.
+The database I am using includes 3 million tweets from conversations between users and customer service accounts for major brands including Spotify, Apple, and Playsation. In long form, this database gives each tweet as a response to one or more other tweets. Furthermore, a tweet may be a response to multiple tweets from different users, or multiple tweets in series from the same user. All this makes Twitter conversations unexpectantly convoluted, and so I took to thinking of conversations as DAGs. Below is an example of interdependencies between tweets represented as a DAG, each edge being a response connection. Nodes A.1 and A.2 are tweets by the same user that were both responsed to by tweet C. My algorithm for generating topological orderings uses breadth-first with one-step lookahead from root nodes and flattens layers of the graph to include single-user tweet series. Given the DAG in Figure 2, my algorithm finds the listed conversations chains.
 <br><br>
 <img src="readme_materials/DAG.png" height="350"><br>
 Figure 2. Conversation DAG and topological orderings discovered.
 <br>
 
-My BFS algorithm was implemented in Spark SQL to efficiently construct nearly 1 million conversations from the 3 million tweets. The process took less than 5 minutes, so this could easily be expanded to more tweets if I found another database. The sequences this yielded were then broken into 5-tweet sub-sequences for training. At inference time, an entire conversation may be used for context because my relative positional encoding scheme is expandable to any context length, but this is not practical for training when number of examples is more important than learning very long-range dependencies. 
+Simplified algorithm:
+```python
+# BFS with lookahead flattening algorithm
+
+#initialization phase
+samples <- {} # columns: context, sender, reponse, author
+tweets <- DataFrame('prev','tweet_id','author', 'next') #long-form conversation graph
+
+chains <- {} #columns: context, sender, response, response_pos = 1, author, next
+chains <- tweets.filter(prev==none) #this starts the conversations from roots
+
+while chains.count() > 0:
+
+    # fan out all edges
+    chains <- chains.positional_explode('next') # context, sender, response, author, next_pos, next
+
+    # flatten fans where one user sends multiple tweets which have one response
+    chains <- chains.groupBy('context','next', 'author').orderBy('response_pos').agg(collectList(response)) #context, sender, response, author, next, next_pos
+
+    # push most recent response and author addtions onto stack
+    chains <- chains.push() #push response and author onto context and sender stacks, context, sender, next, next_pos
+
+    # join chains with next tweet
+    chains <- chains.join(data, on: data.tweet_id == chains.next) #context, sender, response, author, next
+
+    # add growing to samples
+    samples.union(chains) 
+
+    # terminate finished conversation chains
+    chains <- chains.filter(NOT next==none)
+
+end while
+```
+The algorithm was implemented in Spark SQL to efficiently construct nearly 1 million conversations from the 3 million tweets. The process took less than 5 minutes, so this could easily be expanded to more tweets if I found another twitter support dataset. A breakdown of conversations mined shows that conversations with one response make up the majority of conversations. That pattern is explained by support agents frequently requesting the user send them a direct message, then their conversation leaving the record. Plotted with log scale to show all frequencies, an interesting pattern emerges: the frequencies are often grouped in pairs of two. What this shows is that the user requesting support is most likely to end the conversation, since users respond at length = 0, 2, 4, 6, etc. This is likely because they get the help they need, then thank the support agent to end the conversation.
+
+<img src="readme_materials/frequency.png" height=350>
+<img src="readme_materials/log_freq.png" height=350><br>
+Figure 3. Length of conversations in the dataset.
 
 ### Subword Embeddings
 
 The go-to method for representing language in a fixed-length vocab for neural networks is subword embedding, where common words can be represented directly, while rare words can be constructed out of smaller multi-character blocks. This allows the network to learn higher level meanings for many words while also eliminating the out-of-vocab problem when encountering new words. My pre-processing technique for the tweets will follow these steps:
 
-1. Use regex to filter out numbers, urls, and emojis, replacing some with tokens, 
-2. Use byte-pair encoding for tokenization into subwords. I also plan to incorporate a special Capitalize <\c> token, and switch speaker <\s> token. The speaker token may help the Transformer learn better representations for the context, while the capitalize token will help it produce formatted text that can be displayed directly to a user.
-3. Encode byte-pairs as index from vocabulary.
+1. Use regex to filter out urls, phone numbers, signatures, usernames, and emojis, replacing some with tokens,
+2. Use Sentencepiece encoding for tokenization into subwords. The vocab size, 8000, was taken from Google's Meena which found this to be sufficient for generating quality responses while reducing the model parameters.
+3. Encode subwords as index from vocabulary.
 4. Append and pad sequences for feeding into network.
 
-### Progress
 
+### Embedding Layer
+I used word2vec to obtain pre-trained word embeddings, which will be frozen during training to reduce model complexity. The same embeddings will be used for the encoder, decoder, and softmax layers of the Transformer to further reduce parameter size.
+
+### Progress
 * Finished programming architecture
 * Finished mining for conversations, represented as lists of tweet IDs
+* Finished training subword encoder
+* Finished pretrained word embeddings
 * To Do:
-  * Byte-pair encoding of input sequences
   * Finish data input pipeline
   * Train network. Probably going to rent cloud time because it takes a while to train a language model.
 
