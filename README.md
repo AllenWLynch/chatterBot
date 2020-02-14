@@ -26,18 +26,6 @@ Figure 1. Chatbot architecture.<br>
 
 ### Conversation Modeling
 
-The database I am using includes 3 million tweets from conversations between users and customer service accounts for major brands including Spotify, Apple, and Verizon. In long form, this database gives each tweet as a response to one or more other tweets. Furthermore, a tweet may be a response to multiple tweets from different users, or multiple tweets in series from the same user. All this makes Twitter conversations unexpectantly convoluted, and so I took to thinking of conversations as DAGs. Below is an example of interdependencies between tweets represented as a DAG, each edge being a response connection. Nodes A.1 and A.2 are tweets by the same user that were both responsed to by tweet C. My algorithm for generating topological orderings uses breadth-first search from root nodes and flattens layers of the graph to include single-user tweet series. Given the DAG in Figure 2, my algorithm finds the listed conversations chains.
-<br><br>
-<img src="readme_materials/architecture.png" height="500"><br>
-Figure 1. Transformer architecture.
-<br>
-
-Additionally, I plan to use relative positional embeddings in the attention layer, which will be dependent on the features of distance between two word representations and whether that word is part of a response by a user or the entity the chatbot is learning to mimic. I belive this style of positional embedding will lend more ceherence to the string of responses from multiple entities in the context.
-
-## Data
-
-### Conversation Modeling
-
 The database I am using includes 3 million tweets from conversations between users and customer service accounts for major brands including Spotify, Apple, and Playsation. In long form, this database gives each tweet as a response to one or more other tweets. Furthermore, a tweet may be a response to multiple tweets from different users, or multiple tweets in series from the same user. All this makes Twitter conversations unexpectantly convoluted, and so I took to thinking of conversations as DAGs. Below is an example of interdependencies between tweets represented as a DAG, each edge being a response connection. Nodes A.1 and A.2 are tweets by the same user that were both responsed to by tweet C. My algorithm for generating topological orderings uses breadth-first with one-step lookahead from root nodes and flattens layers of the graph to include single-user tweet series. Given the DAG in Figure 2, my algorithm finds the listed conversations chains.
 <br><br>
 <img src="readme_materials/DAG.png" height="350"><br>
