@@ -26,46 +26,14 @@ Figure 1. Chatbot architecture.<br>
 
 ### Conversation Modeling
 
-The database I am using includes 3 million tweets from conversations between users and customer service accounts for major brands including Spotify, Apple, and Playsation. In long form, this database gives each tweet as a response to one or more other tweets. Furthermore, a tweet may be a response to multiple tweets from different users, or multiple tweets in series from the same user. All this makes Twitter conversations unexpectantly convoluted, and so I took to thinking of conversations as DAGs. Below is an example of interdependencies between tweets represented as a DAG, each edge being a response connection. Nodes A.1 and A.2 are tweets by the same user that were both responsed to by tweet C. My algorithm for generating topological orderings uses breadth-first with one-step lookahead from root nodes and flattens layers of the graph to include single-user tweet series. Given the DAG in Figure 2, my algorithm finds the listed conversations chains.
+The database I am using includes 3 million tweets from conversations between users and customer service accounts for major brands including Spotify, Apple, and Playsation. In long form, this database gives each tweet as a response to one or more other tweets. Furthermore, a tweet may be a response to multiple tweets from different users, or multiple tweets in series from the same user. All this makes Twitter conversations unexpectantly convoluted, and so I took to thinking of conversations as DAGs. Below is an example of interdependencies between tweets represented as a DAG, each edge being a response connection. Nodes A.1 and A.2 are tweets by the same user that were both responded to by tweet C. My algorithm for generating topological orderings uses breadth-first with one-step lookahead from root nodes and flattens layers of the graph to include single-user tweet series. Given the DAG in Figure 2, my algorithm finds the listed conversations chains, while merging multi-message-one-user events into agglomerated messages.
+
 <br><br>
 <img src="readme_materials/DAG.png" height="350"><br>
 Figure 2. Conversation DAG and topological orderings discovered.
 <br>
 
-Simplified algorithm:
-```python
-# BFS with lookahead flattening algorithm
-
-#initialization phase
-samples <- {} # columns: context, sender, reponse, author
-tweets <- DataFrame('prev','tweet_id','author', 'next') #long-form conversation graph
-
-chains <- {} #columns: context, sender, response, response_pos = 1, author, next
-chains <- tweets.filter(prev==none) #this starts the conversations from roots
-
-while chains.count() > 0:
-
-    # fan out all edges
-    chains <- chains.positional_explode('next') # context, sender, response, author, next_pos, next
-
-    # flatten fans where one user sends multiple tweets which have one response
-    chains <- chains.groupBy('context','next', 'author').orderBy('response_pos').agg(collectList(response)) #context, sender, response, author, next, next_pos
-
-    # push most recent response and author addtions onto stack
-    chains <- chains.push() #push response and author onto context and sender stacks, context, sender, next, next_pos
-
-    # join chains with next tweet
-    chains <- chains.join(data, on: data.tweet_id == chains.next) #context, sender, response, author, next
-
-    # add growing to samples
-    samples.union(chains) 
-
-    # terminate finished conversation chains
-    chains <- chains.filter(NOT next==none)
-
-end while
-```
-The algorithm was implemented in Spark SQL to efficiently construct nearly 1 million conversations from the 3 million tweets. The process took less than 5 minutes, so this could easily be expanded to more tweets if I found another twitter support dataset. A breakdown of conversations mined shows that conversations with one response make up the majority of conversations. That pattern is explained by support agents frequently requesting the user send them a direct message, then their conversation leaving the record. Plotted with log scale to show all frequencies, an interesting pattern emerges: the frequencies are often grouped in pairs of two. What this shows is that the user requesting support is most likely to end the conversation, since users respond at length = 0, 2, 4, 6, etc. This is likely because they get the help they need, then thank the support agent to end the conversation.
+The algorithm was implemented in Spark SQL to efficiently construct nearly 1.7 million context-response pairs from the 3 million tweets. The process took less than 5 minutes, so this could easily be expanded to more tweets if I found another twitter support dataset. A breakdown of conversations mined shows that conversations with one response make up the majority of conversations. That pattern is explained by support agents frequently requesting the user send them a direct message, then their conversation leaving the record. Plotted with log scale to show all frequencies, an interesting pattern emerges: the frequencies are often grouped in pairs of two. What this shows is that the user requesting support is most likely to end the conversation, since users respond at length = 0, 2, 4, 6, etc. This is likely because they get the help they need, then thank the support agent to end the conversation.
 
 <img src="readme_materials/frequency.png" height=350>
 <img src="readme_materials/log_freq.png" height=350><br>

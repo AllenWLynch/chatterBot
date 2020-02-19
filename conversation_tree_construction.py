@@ -5,14 +5,17 @@ findspark.init()
 
 import pyspark
 
-spark = pyspark.sql.SparkSession.builder.appName("Chatbot prep").getOrCreate()
+spark = pyspark.sql.SparkSession.builder.appName("Chatbot prep")\
+    .config("spark.executor.memory","10g")\
+    .config("spark.driver.memory","10g")\
+    .getOrCreate()
 
 #%%
 from pyspark.sql import functions
 from pyspark.sql import types
 from pyspark.sql import Window
 from collections import defaultdict
-
+import data_utils
 #%%
 
 data = spark.read.csv('./data/twcs/twcs.csv', inferSchema = True, header = True)
@@ -20,55 +23,31 @@ data = data.na.fill('none', ['response_tweet_id','in_response_to_tweet_id'])
 
 #%%
 
-SAVE_PATH = './data/conversation_trees'
+SAVE_PATH = './data/spark_checkpoints'
 spark.sparkContext.setCheckpointDir(SAVE_PATH)
 
-#load in companies to encode speakers
-with open('./data/bot_names.csv', 'r') as f:
-    authors = [line.strip() for line in f.readlines()]
-
-authors = { author : i+1 for (i, author) in enumerate(authors)}
-
-#%%
-
-def encode_authors(author):
-    return str(authors.get(author, int(0)))
-
-encode_authors_udf = functions.udf(encode_authors, types.StringType())
-
-data = data.withColumn('author_name', functions.col('author_id'))
-data = data.withColumn('author_id', encode_authors_udf('author_id'))
-
-def is_english(text, threshold = 0.4):
-    if not text:
-        return 'False'
-    return str(sum([(char.isalpha() and ord(char) <= 127) for char in text])/len(text) > threshold)
-
-is_english_udf = functions.udf(is_english, types.StringType())
-data = data.withColumn('is_english', is_english_udf('text'))
+data = data.withColumn('is_english', data_utils.ENGLISH_UDF('text'))
 data = data.filter(data['is_english'] == "True")
 
-data = data.select('tweet_id','response_tweet_id','author_id', 'in_response_to_tweet_id')
+data = data.select('tweet_id','response_tweet_id', 'in_response_to_tweet_id', 'text', 'author_id')
 
 data.persist()
-#%%
-data.createOrReplaceTempView('data')
 
 #data.persist()
 # %%
 #initialize chains w/ context, response, sender, author_id, next
-roots = spark.sql('''
-    SELECT tweet_id AS response, author_id, response_tweet_id AS next
-    FROM data
-    WHERE in_response_to_tweet_id='none' AND NOT response_tweet_id='none'
-''')
-
-#%%
-chains = roots
+chains = data.filter((data.in_response_to_tweet_id=="none") & ~(data.response_tweet_id=="none"))\
+    .select(
+        functions.col('tweet_id').alias('response'),
+        functions.col('response_tweet_id').alias('next'),
+        'text',
+        'author_id',
+    )
 
 chains = chains.withColumn('context', functions.lit("").cast(types.StringType()))
 chains = chains.withColumn('sender', functions.lit("").cast(types.StringType()))
-chains = chains.withColumn('rpos', functions.list(1).cast(types.IntegerType()))
+chains = chains.withColumn('rpos', functions.lit(1).cast(types.IntegerType()))
+chains = chains.withColumn('tweets', functions.array().cast("array<string>"))
 
 chains.persist()
 
@@ -85,7 +64,7 @@ format_str = '{:10} | {:10}| {:10}'
 print(format_str.format('Iteration', 'Chains','Samples'))
 
 
-#NEW ALGO
+#ALGO
 '''
 1. Find roots, add lit column of rpos
 2. explode next w/ pos -> next, npos
@@ -102,52 +81,60 @@ while chains.count() > 0 and depth < MAX_DEPTH:
     WINDOW_ON = ['context','author_id','next']
     window = Window.partitionBy(WINDOW_ON).orderBy('rpos')
 
-    chains = chains.select('context','sender','response','author_id', functions.posexplode(functions.split('next',","))
+    chains = chains.select('context','sender','tweets','response','author_id','rpos', 'text', functions.posexplode(functions.split('next',","))
         .alias('npos','next'))\
         .repartition(*WINDOW_ON)\
-        .select('context','sender','author_id','next', 
-            functions.concat_ws(',', (functions.collect_list('response').over(window))).alias('response')
-            functions.first(functions.collect_list('npos').alias('rpos')),
+        .select('context','sender','tweets','author_id','next', 
+            functions.concat_ws(',', (functions.collect_list('response').over(window))).alias('response'),
+            functions.first('npos').over(window).alias('rpos'),
+            functions.array(functions.collect_list('text').over(window)).alias('text'),
         )
 
+    chains.persist()
+#%% 
     if depth == 0:
         chains = chains.select(
             functions.concat('context','response').alias('context'),
             functions.concat('sender','author_id').alias('sender'),
             'rpos',
-            'next'
+            'next',
+            functions.col('text').alias('tweets')
         )
     else:
         chains = chains.select(
             functions.concat_ws(',', 'context','response').alias('context'),
             functions.concat_ws(',','sender','author_id').alias('sender'),
+            functions.array_union('tweets','text'),
             'rpos',
             'next'
         )
     
+#%%
     chains = chains.join(data, chains.next == data.tweet_id, 'inner')\
         .select(
             'sender',
             'context',
+            'tweets',
             'rpos',
             data.tweet_id.alias('response'),
             data.author_id,
             data.response_tweet_id.alias('next'),
+            data.text.alias('text')
         )
 
+#%%
     chains.persist()
     #Add to samples
-    samples = samples.unionAll(chains.filter(chains.next == 'none').select('sender','context','response','author_id'))
+    samples = samples.unionAll(chains.select('sender','context','response','author_id'))
     # Remove finished chains
     samples = samples.checkpoint()
     
+#%%
     chains = chains.filter(chains.next != 'none')
 
     chains.persist()
 
     print(format_str.format(str(depth+1), str(chains.count()), str(samples.count())))
-    print(chains.take(1))
-
     chains = chains.checkpoint()
     #checkpoint here
     depth += 1
@@ -155,6 +142,7 @@ while chains.count() > 0 and depth < MAX_DEPTH:
 
 #%%
 
+samples = samples.withColumn('id', functions.monotonically_increasing_id())
 #save samples
 print('Saving!')
 samples.coalesce(1)\

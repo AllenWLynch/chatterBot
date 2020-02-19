@@ -2,6 +2,12 @@
 #%%
 import re
 import pandas as pd
+import findspark
+findspark.init()
+
+import pyspark
+from pyspark.sql import functions
+from pyspark.sql import types
 
 #%%
 #regexes for filtering tweets:
@@ -24,7 +30,7 @@ CHATBOT_TOKEN = '<bot>'
 PHONE_NUMBER_RE = re.compile(r"([+]*[(]{0,1}[0-9]{1,4}[)]{0,1}[-\s\./0-9]{7,15})", re.UNICODE)
 PHONE_TOKEN = '<phone> '
 
-SIGNATURE_RE = re.compile(r"([-/]* *[A-Z]{1,2}[\w]*)$")
+SIGNATURE_RE = re.compile(r"([-/\^]* *[A-Z]{1,2}[\w]*)$")
 SIGNATURE_TOKEN = '<sig>'
 
 #%%
@@ -36,6 +42,30 @@ def apply_filters(text):
     for _re, substitute in zip(FILTERS, SUBSTITUTE_WITH):
         text = _re.sub(substitute, text)
     return text.strip()
+
+FILTER_UDF = functions.udf(apply_filters, types.StringType())
+#%%
+
+# %%
+
+def is_english(text, threshold = 0.4):
+    if not text:
+        return 'False'
+    return str(sum([(char.isalpha() and ord(char) <= 127) for char in text])/len(text) > threshold)
+
+ENGLISH_UDF = functions.udf(is_english, types.StringType())
+
+
+#%%
+with open('./data/bot_names.csv', 'r') as f:
+    AUTHORS = [line.strip() for line in f.readlines()]
+
+AUTHORS = { author : i+1 for (i, author) in enumerate(AUTHORS)}
+
+def encode_authors(author):
+    return AUTHORS.get(author, int(0))
+
+AUTHORS_UDF = functions.udf(encode_authors, types.IntegerType())
 
 #%%
 
