@@ -4,7 +4,6 @@ import numpy as np
 import numpy as np
 import math
 #%%
-
 class RelativePositionalEncoder(tf.keras.layers.Layer):
 
     def __init__(self, max_relative_distance, clipping_fn = None, **kwargs):
@@ -16,24 +15,24 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
             self.clipping_fn = clipping_fn
 
     def build(self, input_shape):
-        
+
         assert(len(input_shape)) == 2, 'Input to positional encoder must be a Q, K'
         assert(len(input_shape[0]) == 4), 'Input matrix must be of shape (m, h, t, d)'
         #print(input_shape)
-
-        embeddings_shape = (2 * (self.max_relative_distance - 1) + 1, d)
+        d = input_shape[0][-1]
+        embeddings_shape = (2 * self.max_relative_distance + 1, d)
         #print(embeddings_shape)
         self.pe = self.add_weight(shape = embeddings_shape, name = 'positional_embeddings')
 
         t_q = input_shape[0][-2]
-        t_k = input_shape[0][-2]
+        t_k = input_shape[1][-2]
 
         t_q_ = tf.expand_dims(tf.range(t_q), -1)
         t_k_ = tf.expand_dims(tf.range(t_k), -1)
 
         relative_distances = (t_q_ - tf.transpose(t_k_))
         relative_distances = self.clipping_fn(relative_distances, self.max_relative_distance)
-        relative_distances = relative_distances + tf.min(self.max_relative_distance + 1, tf.maximum(t_q, t_k)) - 1
+        relative_distances = relative_distances + tf.minimum(self.max_relative_distance + 1, tf.maximum(t_q, t_k)) - 1
         #Q (m,h,t1,d)
         #a (t1,t2,d)
         embeddings = tf.gather(self.pe, relative_distances)
@@ -51,6 +50,7 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
 
         return positional_embedding
 
+#%%
 def dot_product_attn(q, k, v, r, len_q, mask = None):
     
     energies = tf.multiply(1/(len_q**0.5), tf.matmul(q, k, transpose_b = True) + r)
@@ -64,6 +64,9 @@ def dot_product_attn(q, k, v, r, len_q, mask = None):
     context = tf.matmul(alphas, v)
     
     return context
+
+#%%
+
 
 class MultiHeadProjection(tf.keras.layers.Layer):
     
@@ -92,6 +95,7 @@ class MultiHeadProjection(tf.keras.layers.Layer):
         
         return output
 
+#%%
 class AttentionLayer(tf.keras.layers.Layer):
    
     def __init__(self, projected_dim, max_relative_distance = 24, dropout = 0.1, heads = 8, **kwargs):
@@ -118,7 +122,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         self.dropout1 = tf.keras.layers.Dropout(self.dropout_rate)
         self.dropout2 = tf.keras.layers.Dropout(self.dropout_rate)
 
-        self.positional_encoder = RelativePositionalEncoder(max_relative_distance)
+        self.positional_encoder = RelativePositionalEncoder(self.max_relative_distance)
         
 
     def call(self, X, mask = None, training = True):
@@ -132,7 +136,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         Q, K, V = self.projQ(Q), self.projK(K), self.projV(V)
         
         #print(Q.get_shape(), K.get_shape(), V.get_shape())
-        R = self.positional_encoder(Q, K)
+        R = self.positional_encoder((Q, K))
         
         attention = dot_product_attn(Q, K, V, R, self.projected_dim, mask = mask)
         
@@ -146,6 +150,8 @@ class AttentionLayer(tf.keras.layers.Layer):
         output = self.dropout2(output, training = training)
         
         return output
+
+#%%
 
 class FCNNLayer(tf.keras.layers.Layer):
     
@@ -162,22 +168,24 @@ class FCNNLayer(tf.keras.layers.Layer):
     def call(self, X, training = True):
         return self.dropout(self.dense2(self.dense1(X)), training = training)
 
+
+#%%
 class CausalSeperable1DConv(tf.keras.layers.Layer):
 
-    def __init__(self, output_depth, kernel_width, activation = 'ReLU', **kwargs):
+    def __init__(self, output_depth, kernel_width, activation = 'relu', **kwargs):
         super().__init__(**kwargs)
         self.output_depth = output_depth
         self.kernel_width = kernel_width
         self.activation = activation
 
     def build(self,input_shape):
-        assert(len(input_shape) == 3), 'Must be (m, Tx, d_model')
+        assert(len(input_shape) == 3), 'Must be (m, Tx, d_model)'
         m, w, nc = input_shape
 
         self.seperable_conv = tf.keras.layers.SeparableConv2D(self.output_depth, (1, self.kernel_width), 
                 strides = 1, padding = 'valid', activation = self.activation)
 
-        self.padding = tf.keras.layers.ZeroPadding1D((self.kernel_width - 1), 0))
+        self.padding = tf.keras.layers.ZeroPadding1D((self.kernel_width - 1, 0))
 
     def call(self, X):
         X = self.padding(X)
@@ -186,6 +194,8 @@ class CausalSeperable1DConv(tf.keras.layers.Layer):
         X = self.seperable_conv(X)
         X = tf.squeeze(X)
         return X
+
+#%%
 
 class EncoderLayer(tf.keras.layers.Layer):
     
@@ -205,12 +215,12 @@ class EncoderLayer(tf.keras.layers.Layer):
         
         self.projected_dim = self.d_model//self.h
 
-        self.conv1 = CausalSeperable1DConv(self.d_model, self.conv_width[0]),
-        self.conv2 = CausalSeperable1DConv(self.d_model, self.conv_width[1]),
-        self.self_attn = AttentionLayer(self.projected_dim, dropout = self.attn_dropout, heads = self.h, max_relative_distance = self.max_relative_distance),
+        self.conv1 = CausalSeperable1DConv(self.d_model, self.conv_width[0])
+        self.conv2 = CausalSeperable1DConv(self.d_model, self.conv_width[1])
+        self.self_attn = AttentionLayer(self.projected_dim, dropout = self.attn_dropout, heads = self.h, max_relative_distance = self.max_relative_distance)
         self.fc = FCNNLayer(self.d_model, self.dff, dropout = self.fcnn_dropout)
 
-        self.layer_norms = (tf.keras.layers.LayerNormalization() for i in range(4))
+        self.layer_norms = [tf.keras.layers.LayerNormalization() for i in range(4)]
         self.attn_dropout_layer1 = tf.keras.layers.Dropout(self.attn_dropout)
         self.fcnn_dropout_layer = tf.keras.layers.Dropout(self.fcnn_dropout)
                 
@@ -228,6 +238,8 @@ class EncoderLayer(tf.keras.layers.Layer):
         
         return X
 
+#%%
+
 class DecoderLayer(EncoderLayer):
     
     def __init__(self, **kwargs):
@@ -236,7 +248,10 @@ class DecoderLayer(EncoderLayer):
     def build(self, input_shape):
         super().build(input_shape)
         
-        self.encoder_attn = AttentionLayer(self.projected_dim, heads=self.h, dropout= self.attn_dropout, max_relative_distance = self.max_relative_distance)
+        self.encoder_attn = AttentionLayer(self.projected_dim, 
+            heads=self.h, 
+            dropout= self.attn_dropout, 
+            max_relative_distance = self.max_relative_distance)
         self.layer_norms.append(tf.keras.layers.LayerNormalization())
         self.attn_dropout_layer2 = tf.keras.layers.Dropout(self.attn_dropout)
                 
@@ -258,6 +273,8 @@ class DecoderLayer(EncoderLayer):
                 
         return X
 
+#%%
+
 class HighwayLayer(tf.keras.layers.Layer):
 
     def __init__(self, **kwargs):
@@ -265,8 +282,9 @@ class HighwayLayer(tf.keras.layers.Layer):
 
     def build(self, input_shape):
 
+        assert(len(input_shape) == 2), 'Input to highway layer must be (H(X0), X0)'
         assert(input_shape[0] == input_shape[1])
-        self.d_model = input_shape[-1]
+        self.d_model = input_shape[0][-1]
         self.Wt = self.add_weight(shape = (self.d_model, self.d_model), name = 'Wt', dtype = 'float32')
         self.bt = self.add_weight(shape = (1, self.d_model), name = 'bt', dtype = 'float32')
 
@@ -275,6 +293,8 @@ class HighwayLayer(tf.keras.layers.Layer):
         (X0, X1) = X 
         Tx = tf.math.sigmoid(tf.matmul(X0, self.Wt) + self.bt)
         return tf.math.multiply(X1, Tx) + tf.math.multiply(X0, (1.0 - Tx))
+
+#%%
 
 class HighwayCNNLayer(tf.keras.layers.Layer):
 
@@ -288,7 +308,9 @@ class HighwayCNNLayer(tf.keras.layers.Layer):
         self.highway = HighwayLayer()
 
     def call(self, X):
-        return self.highway(self.cnn(X), X)
+        return self.highway((self.cnn(X), X))
+
+#%%
 
 class MaskEmbedder(tf.keras.layers.Layer):
 
@@ -296,33 +318,66 @@ class MaskEmbedder(tf.keras.layers.Layer):
         super().__init__(**kwargs)
         self.embedding_layer = embedding_layer
 
+    def call(self, inputs, mask):
+
+        X = self.embedding_layer(inputs)
+
+        loss_mask = self.embedding_layer.compute_mask(inputs)
+
+        padding_mask = tf.cast(loss_mask[:,tf.newaxis,tf.newaxis,:], tf.float32)
+
+        attn_mask = tf.math.multiply(mask, padding_mask)
+
+        return X, attn_mask, loss_mask
+
+#%%
+
+class RepresentationLayers(tf.keras.layers.Layer):
+
+    def __init__(self, embedding_layer, d_model, num_speakers, num_highway_layers, 
+            num_shared_layers, transformer_layer_kwargs, **kwargs):
+
+        super().__init__(**kwargs)
+        self.embedding_layer = embedding_layer
+        self.num_highway_layers = num_highway_layers
+        self.num_shared_layers = num_shared_layers
+        self.transformer_layer_kwargs = transformer_layer_kwargs
+        self.num_speakers = num_speakers
+        self.d_model = d_model
+
     def build(self, input_shape):
-        (self.m, self.tx) = input_shape
-        self.embedding_layer.build(input_shape)
+        
+        self.word_embedder = MaskEmbedder(self.embedding_layer)
+        self.highway_network = tf.keras.Sequential([
+            HighwayCNNLayer(5) for i in range(self.num_highway_layers)
+        ])
+        self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers, self.d_model)
+        self.shared_layers = (EncoderLayer(**self.transformer_layer_kwargs) for i in range(self.num_shared_layers))
 
-    #(m, tx)
-    def call(self, X, mask):
+    def call(self, X, sender, attn_precursor_mask, training = True):
 
-        X = self.embedding_layer(X)
+        X, attn_mask, loss_mask = self.word_embedder(X, attn_precursor_mask)
+    
+        X = X + self.speaker_embedder(sender)
+        
+        X = self.highway_network(X)   
 
-        padding_mask = self.embedding_layer.compute_mask(X)
+        for shared_layer in self.shared_layers:
+            X = shared_layer(X, attn_mask, training = training)    
 
-        attn_mask = tf.multiply(mask, padding_mask)
-
-        mask = mask[:, tf.newaxis, tf.newaxis, :]
-
-        return X, padding_mask, attn_mask
+        return X, attn_mask, loss_mask
 
 class Transformer(tf.keras.Model):
 
-    def __init__(
-        num_subwords,
-        num_speakers,
-        num_encoder_layers,
-        num_decoder_layers,
-        num_highway_layers
-        num_shared_layers,
-        transformer_layer_kwargs,
+    def __init__(self, 
+        num_subwords, 
+        num_speakers, 
+        transformer_layer_kwargs = dict(),
+        d_model = 512,
+        num_encoder_layers = 1, 
+        num_decoder_layers = 6, 
+        num_highway_layers = 2, 
+        num_shared_layers = 4, 
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -332,6 +387,8 @@ class Transformer(tf.keras.Model):
         self.num_encoder_layers = num_encoder_layers
         self.num_shared_layers = num_shared_layers
         self.num_highway_layers = num_highway_layers
+        self.d_model = d_model
+        self.transformer_layer_kwargs = transformer_layer_kwargs
 
     def build(self, input_shape):
         assert(len(input_shape) == 4), 'Input must consist of (context, speaker, response, author) set.'
@@ -341,41 +398,32 @@ class Transformer(tf.keras.Model):
         (m, tr) = input_shape[2]
 
         ## generate masks here
-
+        (m, t_c) = input_shape[0]
+        (m, t_r) = input_shape[2]
+        self.context_mask = tf.ones((1,1,1,t_c))
+        self.response_mask = tf.linalg.band_part(tf.ones((t_r, t_r)), -1, 0)[tf.newaxis, tf.newaxis, :, :]
         ##
-        self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers, self.d_model)
-
-        self.word_embedder = MaskEmbedder(tf.keras.layers.Embedding(self.num_subwords, self.d_model))
-
-        self.highway_network = tf.keras.Sequential([
-            HighwayCNNLayer(5) for i in range(self.num_highway_layers)
-        ])
-
-        self.shared_layers = (EncoderLayer(**self.transformer_layer_kwargs) for i in range(self.shared_layers))
-
+        self.embedding_layer = tf.keras.layers.Embedding(self.num_subwords, self.d_model, mask_zero = True)
+ 
+        self.representation_layer = RepresentationLayers(self.embedding_layer, self.d_model, self.num_speakers, self.num_highway_layers, 
+            self.num_shared_layers, self.transformer_layer_kwargs)
+        
         self.encoder_layers = (EncoderLayer(**self.transformer_layer_kwargs) for i in range(self.num_encoder_layers))
 
         self.decoder_layers = (DecoderLayer(**self.transformer_layer_kwargs) for i in range(self.num_decoder_layers))
 
-    def call(self, X, training = training):
+    def call(self, X, training = True):
 
         (context, speaker, response, author) = X
 
-        context, context_mask, _ = self.word_embedder(context, self.context_mask)
-        response, response_mask, loss_mask = self.word_embedder(response, self.response_mask)
-
-        context = self.highway_network(context)
-        response = self.highway_network(response)
-
-        for shared_layer in self.shared_layers:
-            context = shared_layer(context, context_mask, training = training)
-            response = shared_layer(response, response_mask, training = training)
+        context, context_attn_mask, _ = self.representation_layer(context, speaker, self.context_mask, training = training)
+        response, response_attn_mask, loss_mask = self.representation_layer(response, author, self.response_mask, training = training)
 
         for encoder_layer in self.encoder_layers:
-            context = encoder_layer(context, context_mask, training = training)
+            context = encoder_layer(context, context_attn_mask, training = training)
 
         for decoder_layer in self.decoder_layers:
-            response = decoder_layer(response, context, response_mask, context_mask, training = training)
+            response = decoder_layer(response, context, response_attn_mask, context_attn_mask, training = training)
 
         output_logits = tf.matmul(response, tf.transpose(self.embedding_layer.embeddings))
 
@@ -394,7 +442,6 @@ class TransformerLoss():
         losses = self.loss_obj(labels, logits)
         mean_loss = tf.reduce_mean(tf.boolean_mask(losses, loss_mask))
         return mean_loss 
-
 
 # # Optimizer
 
@@ -421,3 +468,5 @@ def TransformerOptimizer(d_model):
 
     return tf.keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, 
                                      epsilon=1e-9)
+
+class
