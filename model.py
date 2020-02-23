@@ -3,6 +3,11 @@ import tensorflow as tf
 import numpy as np
 import numpy as np
 import math
+from tensorflow.keras.mixed_precision import experimental as mixed_precision
+
+policy = mixed_precision.Policy('mixed_float16')
+mixed_precision.set_policy(policy)
+
 #%%
 class RelativePositionalEncoder(tf.keras.layers.Layer):
 
@@ -53,10 +58,10 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
 #%%
 def dot_product_attn(q, k, v, r, len_q, mask = None):
     
-    energies = tf.multiply(1/(len_q**0.5), tf.matmul(q, k, transpose_b = True) + r)
+    energies = tf.multiply(tf.cast(1/(len_q**0.5), tf.float16), tf.matmul(q, k, transpose_b = True) + r)
     
     if not mask is None:
-        mask = (1. - mask) * -1e9
+        mask = (1. - tf.cast(mask, 'float16')) * -1e9
         energies = tf.add(energies, mask)
     
     alphas = tf.nn.softmax(energies, axis = -1)
@@ -220,11 +225,12 @@ class EncoderLayer(tf.keras.layers.Layer):
         self.self_attn = AttentionLayer(self.projected_dim, dropout = self.attn_dropout, heads = self.h, max_relative_distance = self.max_relative_distance)
         self.fc = FCNNLayer(self.d_model, self.dff, dropout = self.fcnn_dropout)
 
-        self.layer_norms = [tf.keras.layers.LayerNormalization() for i in range(4)]
+        self.layer_norms = [tf.keras.layers.LayerNormalization(dtype = tf.float16) for i in range(4)]
         self.attn_dropout_layer1 = tf.keras.layers.Dropout(self.attn_dropout)
         self.fcnn_dropout_layer = tf.keras.layers.Dropout(self.fcnn_dropout)
                 
     def call(self, X, padding_mask, training = True):
+        
         
         X = X + self.conv1(self.layer_norms[0](X))
 
@@ -252,7 +258,7 @@ class DecoderLayer(EncoderLayer):
             heads=self.h, 
             dropout= self.attn_dropout, 
             max_relative_distance = self.max_relative_distance)
-        self.layer_norms.append(tf.keras.layers.LayerNormalization())
+        self.layer_norms.append(tf.keras.layers.LayerNormalization(dtype='float16'))
         self.attn_dropout_layer2 = tf.keras.layers.Dropout(self.attn_dropout)
                 
     def call(self, X, encoder_output, decoder_mask, encoder_mask, training = True):
@@ -285,8 +291,8 @@ class HighwayLayer(tf.keras.layers.Layer):
         assert(len(input_shape) == 2), 'Input to highway layer must be (H(X0), X0)'
         assert(input_shape[0] == input_shape[1])
         self.d_model = input_shape[0][-1]
-        self.Wt = self.add_weight(shape = (self.d_model, self.d_model), name = 'Wt', dtype = 'float32')
-        self.bt = self.add_weight(shape = (1, self.d_model), name = 'bt', dtype = 'float32')
+        self.Wt = self.add_weight(shape = (self.d_model, self.d_model), name = 'Wt')
+        self.bt = self.add_weight(shape = (1, self.d_model), name = 'bt')
 
     def call(self, X):
 
@@ -351,7 +357,7 @@ class RepresentationLayers(tf.keras.layers.Layer):
         self.highway_network = tf.keras.Sequential([
             HighwayCNNLayer(5) for i in range(self.num_highway_layers)
         ])
-        self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers, self.d_model)
+        self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers + 1, self.d_model, mask_zero = True)
         self.shared_layers = (EncoderLayer(**self.transformer_layer_kwargs) for i in range(self.num_shared_layers))
 
     def call(self, X, sender, attn_precursor_mask, training = True):
@@ -370,14 +376,14 @@ class RepresentationLayers(tf.keras.layers.Layer):
 class Transformer(tf.keras.Model):
 
     def __init__(self, 
-        num_subwords, 
-        num_speakers, 
-        transformer_layer_kwargs = dict(),
+        num_subwords = 8000, 
+        num_speakers = 2, 
         d_model = 512,
         num_encoder_layers = 1, 
         num_decoder_layers = 6, 
         num_highway_layers = 2, 
         num_shared_layers = 4, 
+        transformer_layer_kwargs = dict(),
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -425,12 +431,14 @@ class Transformer(tf.keras.Model):
         for decoder_layer in self.decoder_layers:
             response = decoder_layer(response, context, response_attn_mask, context_attn_mask, training = training)
 
+        response = tf.keras.layers.Activation('linear', dtype = tf.float32)(response)
+
         output_logits = tf.matmul(response, tf.transpose(self.embedding_layer.embeddings))
 
-        return output_logits, loss_mask
+        return output_logits, tf.cast(loss_mask, tf.float32)
 
 # %%
-class TransformerLoss():
+class TransformerLoss_fp16():
 
     def __init__(self):
         
@@ -462,11 +470,124 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
         return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
 
 
-def TransformerOptimizer(d_model):
+class ChatBotModel():
+
+    def __init__(self, sentencepiece_model, architecture_kwargs, transformer_layer_kwargs, **kwargs):
+
+        self.model = Transformer(**architecture_kwargs, transformer_layer_kwargs= transformer_layer_kwargs, **kwargs)
+
+        adam_opt = tf.keras.optimizers.Adam(CustomSchedule(self.model.d_model), beta_1=0.9, beta_2=0.98, epsilon=1e-9)
+
+        self.optimizer = mixed_precision.LossScaleOptimizer(adam_opt, loss_scale = 'dynamic')
+
+        self.loss_obj = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+
+        self.test_metrics = []
+        self.train_metrics = []
+
+        self.decoder = sentencepiece_model
+
+    def add_train_metric(self, metric):
+        self.train_metric.append(metric)
+
+    def add_test_metric(self, metric):
+        self.test_metrics.append(metric)
+
+    @tf.function()
+    def train_step(self, X, Y):
+
+        with tf.GradientTape() as tape:
+
+            logits, loss_weights = self.model(X, training = True)
+
+            loss = self.loss_obj(Y, logits, sample_weight = loss_weights)
+
+            scaled_loss = self.optimizer.get_scaled_loss(loss)
+
+        scaled_gradients = tape.gradient(scaled_loss, self.model.trainable_weights)
+        gradients = self.optimizer.get_unscaled_gradients(scaled_gradients)
+        self.optimizer.apply_gradients(zip(gradients, self.model.trainable_weights))
+        
+        for metric in self.train_metrics:
+            metric.update_state(Y, logits, sample_weight = loss_weights)
+
+    @tf.function()
+    def test_step(self, X, Y):
+
+        logits, loss_weights = self.model(X, training = False)
+
+        for metric in self.test_metrics:
+            metric.update_state(Y, logits, sample_weight = loss_weights)
+
+    @tf.function()
+    def predict(self, X, temperature):
+        
+        logits, weights = self.model(X, training = False)
+        logits = logits + (1. - weights) * -1e9
+        autoregressive_inf =  logits[:,-1,:]/temperature
+
+        probs = tf.nn.softmax(autoregressive_inf, axis = -1)
+
+        return probs        
+
+    @tf.function()
+    def sample(self, context, sender, author, response_len, temperature = 0.8):
+        
+        response = [1]
+        author = [author]
+        idx = 0
+
+        for i in range(response_len):
+            
+            padded_response = tf.keras.preprocessing.sequence.pad_sequences([response])
+            padded_author = tf.keras.preprocessing.sequence.pad_sequences([author])
+            
+            probs = self.predict((context, sender, padded_response, padded_author))[0]
+            
+            idx = np.choice(np.range(probs), p = probs)
+
+            author[0].append(author)
+            response[0].append(idx)
+
+            if idx == 2:
+                break
+
+        prediction = ''.join(self.decoder.DecodePieces(response)).replace('_',' ')
+        return prediction
+
     
-    learning_rate = CustomSchedule(d_model)
 
-    return tf.keras.optimizers.Adam(learning_rate, beta_1=0.9, beta_2=0.98, 
-                                     epsilon=1e-9)
+    def fit(self, train_dataset, test_dataset, epochs, steps_per_epoch, evaluation_steps, checkpoint_manager, checkpoint_every, fp16 = False):
 
-class
+        try:
+            for epoch in range(epochs):
+                print('EPOCH ', epoch + 1)
+                
+                self.train_epoch(steps_per_epoch, train_dataset, fp16=fp16)
+
+                self.evaluate(evaluation_steps, test_dataset, 3)        
+
+                if (epoch + 1) % checkpoint_every == 0:
+                    checkpoint_manager.save()
+                    print('Saved Checkpoint!')    
+
+        except KeyboardInterrupt:
+            print('Training interupted!')
+            user_input = ''
+            while not (user_input == 'y' or user_input == 'n'):
+                user_input = input('Save model\'s current state?: [y/n]')
+            if user_input == 'y':
+                checkpoint_manager.save()
+                print('Saved checkpoint!')
+            
+        else:
+            print('Training complete! Saving final model.')
+            checkpoint_manager.save()
+
+
+        
+
+
+
+
+        
