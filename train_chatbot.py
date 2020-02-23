@@ -5,13 +5,14 @@ import numpy as np
 
 #%%
 import model
-from pipelines import chatbot_training_stream, example_stream
+import pipelines
 import importlib
 import sentencepiece
 
 model = importlib.reload(model)
+pipelines = importlib.reload(pipelines)
 #%%
-subword_processor = spm.SentencePieceProcessor()
+subword_processor = sentencepiece.SentencePieceProcessor()
 subword_processor.Load("./model_components/spm/sentpiece_model.model")
 
 architecture_specs =  dict(
@@ -39,16 +40,24 @@ inference_pipeline = example_stream('./data/test_samples', CONTEXT_LENGTH)
 #%%
 
 chatbot.add_train_metric(tf.keras.metrics.SparseCategoricalCrossentropy(name = '[Train] Sparse Categorical Crossentropy', from_logits=True))
-chatbot.add_train_metric(tf.keras.metrics.SparseCategoricalAccuracy(name = '[Train] Sparse Categorical Accuracy', from_logits=True))
 
 chatbot.add_test_metric(tf.keras.metrics.SparseCategoricalCrossentropy(name = '[Test] Sparse Categorical Crossentropy', from_logits=True))
-chatbot.add_test_metric(tf.keras.metrics.SparseCategoricalAccuracy(name = '[Test] Sparse Categorical Accuracy', from_logits=True))
 
 
 # %%
 example = next(iter(train_pipeline))
 
+chatbot.train_step(example[0], example[1])
 
+# %%
 
+sample = next(iter(inference_pipeline))
+
+# %%
+chatbot.respond(*sample[:3], 128)
+
+# %%
+
+chatbot.model(example[0])
 
 # %%

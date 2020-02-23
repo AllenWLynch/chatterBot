@@ -188,7 +188,7 @@ class CausalSeperable1DConv(tf.keras.layers.Layer):
         m, w, nc = input_shape
 
         self.seperable_conv = tf.keras.layers.SeparableConv2D(self.output_depth, (1, self.kernel_width), 
-                strides = 1, padding = 'valid', activation = self.activation)
+                strides = 1, padding = 'valid', activation = self.activation, use_bias = False)
 
         self.padding = tf.keras.layers.ZeroPadding1D((self.kernel_width - 1, 0))
 
@@ -197,7 +197,7 @@ class CausalSeperable1DConv(tf.keras.layers.Layer):
         #m, w, nc -> m, h = 1, w, nc
         X = tf.expand_dims(X, 1)
         X = self.seperable_conv(X)
-        X = tf.squeeze(X)
+        X = tf.squeeze(X, axis = 1)
         return X
 
 #%%
@@ -488,7 +488,7 @@ class ChatBotModel():
         self.decoder = sentencepiece_model
 
     def add_train_metric(self, metric):
-        self.train_metric.append(metric)
+        self.train_metrics.append(metric)
 
     def add_test_metric(self, metric):
         self.test_metrics.append(metric)
@@ -531,30 +531,39 @@ class ChatBotModel():
         return probs        
 
     @tf.function()
-    def sample(self, context, sender, author, response_len, temperature = 0.8):
+    def predict(self, X, temperature):
         
-        response = [1]
-        author = [author]
+        logits, weights = self.model(X, training = False)
+        logits = logits + tf.expand_dims((1. - weights) * -1e9, -1)
+        autoregressive_inf =  logits[:,-1,:]/temperature
+
+        probs = tf.nn.softmax(autoregressive_inf, axis = -1)
+
+        return probs
+
+    def respond(self, context, sender, author, response_len, temperature = 0.8):
+        
+        assert(context.shape[0] == 1), 'Inference only works with batch size of 1'
+
+        response = [[1]]
         idx = 0
+
+        author_id = author[0]
 
         for i in range(response_len):
             
-            padded_response = tf.keras.preprocessing.sequence.pad_sequences([response])
-            padded_author = tf.keras.preprocessing.sequence.pad_sequences([author])
-            
-            probs = self.predict((context, sender, padded_response, padded_author))[0]
-            
-            idx = np.choice(np.range(probs), p = probs)
+            padded_response = tf.keras.preprocessing.sequence.pad_sequences(response, response_len)
+            padded_author = tf.keras.preprocessing.sequence.pad_sequences(author, response_len)
+            probs = self.predict((context, sender, padded_response, padded_author), temperature)[0].numpy()
 
-            author[0].append(author)
-            response[0].append(idx)
+            idx = np.random.choice(len(probs), p = probs)
+            response = tf.concat([response, [[idx]]], axis = -1)
+            author = tf.concat([author, [author_id]], axis = -1)
 
             if idx == 2:
                 break
 
-        prediction = ''.join(self.decoder.DecodePieces(response)).replace('_',' ')
-        return prediction
-
+        return self.decoder.DecodeIds(response.numpy()[0].tolist())
     
 
     def fit(self, train_dataset, test_dataset, epochs, steps_per_epoch, evaluation_steps, checkpoint_manager, checkpoint_every, fp16 = False):

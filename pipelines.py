@@ -9,7 +9,7 @@ import numpy as np
 import os
 
 #%%
-def convert_from_json(context_len, response_len, json_str):
+def convert_from_json(seq_len, json_str):
 
     x = json.loads(json_str.numpy())
 
@@ -20,10 +20,9 @@ def convert_from_json(context_len, response_len, json_str):
     sequences[1] += 1
     sequences[3] += 1
 
-    padded_context = tf.keras.preprocessing.sequence.pad_sequences(sequences[:2], context_len)
-    padded_response = tf.keras.preprocessing.sequence.pad_sequences(sequences[2:], response_len)
+    sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, seq_len)
     
-    return padded_context[0], padded_context[1], padded_response[0], padded_response[1], padded_response[2]
+    return sequences[:]
 
 def process_json(context_len, response_len, textline):
 
@@ -67,7 +66,7 @@ def read_example(context_len, json_str):
 
     padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, context_len)
 
-    return padded_sequences[0], padded_sequences[1], x['author_id'][0], '\n'.join(x['tweets'])
+    return padded_sequences[0], padded_sequences[1], [x['author_id'][0]], '\n'.join(x['tweets'])
 
 def process_example(context_len, textline):
 
@@ -75,7 +74,7 @@ def process_example(context_len, textline):
 
 def example_stream(test_dir, context_len):
 
-    filenames = [os.path.join(datadir, filename) for filename in os.listdir(datadir)]
+    filenames = [os.path.join(test_dir, filename) for filename in os.listdir(test_dir)]
 
     dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
@@ -88,8 +87,8 @@ def example_stream(test_dir, context_len):
     dataset = dataset.batch(1)
 
     return dataset
+    
 
-inference_pipeline = example_stream('./data/test_samples', 128)
 
 
 
