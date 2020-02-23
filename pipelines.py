@@ -22,25 +22,25 @@ def convert_from_json(seq_len, json_str):
 
     sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, seq_len)
     
-    return sequences[:]
+    return sequences[0], sequences[1], sequences[2], sequences[3], sequences[4]
 
-def process_json(context_len, response_len, textline):
+def process_json(seq_len, textline):
 
-    return tf.py_function(convert_from_json, [context_len, response_len, textline], (tf.int32, tf.int32, tf.int32, tf.int32, tf.int32))
+    return tf.py_function(convert_from_json, [seq_len, textline], (tf.int32, tf.int32, tf.int32, tf.int32, tf.int32))
 
 def group_xy(context, sender, response_input, author, response_target):
 
     return (context, sender, response_input, author), response_target
 
 
-def chatbot_training_stream(datadir, context_len, response_len, batch_size, shuffle_size = 400):
+def chatbot_training_stream(datadir, seq_len, batch_size, shuffle_size = 400):
 
     filenames = [os.path.join(datadir, filename) for filename in os.listdir(datadir)]
 
     dataset = tf.data.Dataset.from_tensor_slices(filenames)
 
     dataset = dataset.interleave(lambda filename : 
-        tf.data.TextLineDataset(filename).map(lambda x : process_json(context_len, response_len, x), num_parallel_calls = tf.data.experimental.AUTOTUNE),
+        tf.data.TextLineDataset(filename).map(lambda x : process_json(seq_len, x), num_parallel_calls = tf.data.experimental.AUTOTUNE),
         num_parallel_calls=tf.data.experimental.AUTOTUNE
     )
 

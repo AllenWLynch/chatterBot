@@ -27,7 +27,7 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
         d = input_shape[0][-1]
         embeddings_shape = (2 * self.max_relative_distance + 1, d)
         #print(embeddings_shape)
-        self.pe = self.add_weight(shape = embeddings_shape, name = 'positional_embeddings')
+        self.embeddings = self.add_weight(shape = embeddings_shape, name = 'positional_embeddings', trainable = True)
 
         t_q = input_shape[0][-2]
         t_k = input_shape[1][-2]
@@ -37,12 +37,9 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
 
         relative_distances = (t_q_ - tf.transpose(t_k_))
         relative_distances = self.clipping_fn(relative_distances, self.max_relative_distance)
-        relative_distances = relative_distances + tf.minimum(self.max_relative_distance + 1, tf.maximum(t_q, t_k)) - 1
+        self.relative_distances = relative_distances + tf.minimum(self.max_relative_distance + 1, tf.maximum(t_q, t_k)) - 1
         #Q (m,h,t1,d)
         #a (t1,t2,d)
-        embeddings = tf.gather(self.pe, relative_distances)
-
-        self.attn_rpes = tf.transpose(embeddings, perm = [0, 2, 1])
         #self.pe_matrix = tf.gather(self.pe, relative_distances)
 
     #pass (Q,K)
@@ -50,8 +47,12 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
 
         (Q, K) = X
 
+        embeddings = tf.gather(self.embeddings, self.relative_distances)
+
+        embeddings = tf.transpose(embeddings, perm = [0, 2, 1])
+
         #(m,h,t1,d) dot (t1,d,t2) => (m,h,t1,t2)
-        positional_embedding = tf.einsum('mhtd,tds->mhts', Q, self.attn_rpes)
+        positional_embedding = tf.einsum('mhtd,tds->mhts', Q, embeddings)
 
         return positional_embedding
 
@@ -59,9 +60,9 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
 def dot_product_attn(q, k, v, r, len_q, mask = None):
     
     energies = tf.multiply(tf.cast(1/(len_q**0.5), tf.float16), tf.matmul(q, k, transpose_b = True) + r)
-    
+
     if not mask is None:
-        mask = (1. - tf.cast(mask, 'float16')) * -1e9
+        mask = (1. - tf.cast(mask, 'float16')) * -65504
         energies = tf.add(energies, mask)
     
     alphas = tf.nn.softmax(energies, axis = -1)
@@ -139,7 +140,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         (Q,K,V) = X
         
         Q, K, V = self.projQ(Q), self.projK(K), self.projV(V)
-        
+                
         #print(Q.get_shape(), K.get_shape(), V.get_shape())
         R = self.positional_encoder((Q, K))
         
@@ -230,7 +231,6 @@ class EncoderLayer(tf.keras.layers.Layer):
         self.fcnn_dropout_layer = tf.keras.layers.Dropout(self.fcnn_dropout)
                 
     def call(self, X, padding_mask, training = True):
-        
         
         X = X + self.conv1(self.layer_norms[0](X))
 
@@ -334,14 +334,14 @@ class MaskEmbedder(tf.keras.layers.Layer):
 
         attn_mask = tf.math.multiply(mask, padding_mask)
 
-        return X, attn_mask, loss_mask
+        return X, attn_mask, padding_mask, loss_mask
 
 #%%
 
 class RepresentationLayers(tf.keras.layers.Layer):
 
     def __init__(self, embedding_layer, d_model, num_speakers, num_highway_layers, 
-            num_shared_layers, transformer_layer_kwargs, **kwargs):
+            num_shared_layers, transformer_layer_kwargs, embedding_dropout = 0.1, **kwargs):
 
         super().__init__(**kwargs)
         self.embedding_layer = embedding_layer
@@ -350,6 +350,7 @@ class RepresentationLayers(tf.keras.layers.Layer):
         self.transformer_layer_kwargs = transformer_layer_kwargs
         self.num_speakers = num_speakers
         self.d_model = d_model
+        self.dropout = tf.keras.layers.Dropout(embedding_dropout)
 
     def build(self, input_shape):
         
@@ -358,20 +359,26 @@ class RepresentationLayers(tf.keras.layers.Layer):
             HighwayCNNLayer(5) for i in range(self.num_highway_layers)
         ])
         self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers + 1, self.d_model, mask_zero = True)
-        self.shared_layers = (EncoderLayer(**self.transformer_layer_kwargs) for i in range(self.num_shared_layers))
+        self.shared_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_shared_layers)]
 
-    def call(self, X, sender, attn_precursor_mask, training = True):
+    def call(self, X, sender, context_response_embedding, attn_precursor_mask, training = True):
 
-        X, attn_mask, loss_mask = self.word_embedder(X, attn_precursor_mask)
-    
+        X, attn_mask, padding_mask, loss_mask = self.word_embedder(X, attn_precursor_mask) 
+
+        X = X * tf.math.sqrt(tf.cast(self.d_model, tf.float32))
+
         X = X + self.speaker_embedder(sender)
-        
-        X = self.highway_network(X)   
 
-        for shared_layer in self.shared_layers:
-            X = shared_layer(X, attn_mask, training = training)    
+        X = tf.cast(X,tf.float32) + context_response_embedding
 
-        return X, attn_mask, loss_mask
+        X = self.dropout(X)
+    
+        X = self.highway_network(X)
+
+        for i, shared_layer in enumerate(self.shared_layers):
+            X = shared_layer(X, attn_mask, training = training)
+
+        return X, attn_mask, padding_mask, loss_mask
 
 class Transformer(tf.keras.Model):
 
@@ -407,26 +414,33 @@ class Transformer(tf.keras.Model):
         (m, t_c) = input_shape[0]
         (m, t_r) = input_shape[2]
         self.context_mask = tf.ones((1,1,1,t_c))
-        self.response_mask = tf.linalg.band_part(tf.ones((t_r, t_r)), -1, 0)[tf.newaxis, tf.newaxis, :, :]
+        self.lookahead_mask = tf.linalg.band_part(tf.ones((t_r, t_r)), -1, 0)[tf.newaxis, tf.newaxis, :, :]
         ##
         self.embedding_layer = tf.keras.layers.Embedding(self.num_subwords, self.d_model, mask_zero = True)
  
-        self.representation_layer = RepresentationLayers(self.embedding_layer, self.d_model, self.num_speakers, self.num_highway_layers, 
+        self.representation_model = RepresentationLayers(self.embedding_layer, self.d_model, self.num_speakers, self.num_highway_layers, 
             self.num_shared_layers, self.transformer_layer_kwargs)
         
-        self.encoder_layers = (EncoderLayer(**self.transformer_layer_kwargs) for i in range(self.num_encoder_layers))
+        self.encoder_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_encoder_layers)]
 
-        self.decoder_layers = (DecoderLayer(**self.transformer_layer_kwargs) for i in range(self.num_decoder_layers))
+        self.decoder_layers = [DecoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_decoder_layers)]
 
-    def call(self, X, training = True):
+        self.context_embedding = self.add_weight(shape = (1,1,self.d_model), name = 'context_embedding', dtype = tf.float32)
+        self.response_embedding = self.add_weight(shape = (1,1,self.d_model), name= 'response_embedding', dtype = tf.float32)
+        
+    def encode_context(self, context, sender, training = True):
 
-        (context, speaker, response, author) = X
-
-        context, context_attn_mask, _ = self.representation_layer(context, speaker, self.context_mask, training = training)
-        response, response_attn_mask, loss_mask = self.representation_layer(response, author, self.response_mask, training = training)
-
+        context, _, context_attn_mask, _ = self.representation_model(context, sender, self.context_embedding, self.lookahead_mask, training = training)
+        
         for encoder_layer in self.encoder_layers:
             context = encoder_layer(context, context_attn_mask, training = training)
+
+        return context, context_attn_mask
+
+    def decode_response(self, response, author, context, context_attn_mask, training = True):
+
+        response, response_attn_mask, _, loss_mask = self.representation_model(response, author, 
+            self.response_embedding, self.lookahead_mask, training = training)
 
         for decoder_layer in self.decoder_layers:
             response = decoder_layer(response, context, response_attn_mask, context_attn_mask, training = training)
@@ -437,22 +451,19 @@ class Transformer(tf.keras.Model):
 
         return output_logits, tf.cast(loss_mask, tf.float32)
 
+    def call(self, X, training = True):
+
+        (context, sender, response, author) = X
+
+        output_logits, loss_mask = self.decode_response(
+                response, 
+                author, 
+                *self.encode_context(context, sender, training = training), 
+                training = training)
+
+        return output_logits, loss_mask
+
 # %%
-class TransformerLoss_fp16():
-
-    def __init__(self):
-        
-        self.loss_obj = tf.keras.losses.SparseCategoricalCrossentropy(
-                        from_logits=True, reduction='none')
-
-    @tf.function()
-    def __call__(self, labels, logits, loss_mask):
-        losses = self.loss_obj(labels, logits)
-        mean_loss = tf.reduce_mean(tf.boolean_mask(losses, loss_mask))
-        return mean_loss 
-
-# # Optimizer
-
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
     
     def __init__(self, d_model, warmup_steps=4000):
@@ -467,8 +478,7 @@ class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
         arg1 = tf.math.rsqrt(step)
         arg2 = step * (self.warmup_steps ** -1.5)
 
-        return tf.math.rsqrt(self.d_model) * tf.math.minimum(arg1, arg2)
-
+        return tf.math.rsqrt(self.d_model) * tf.cast(tf.math.minimum(arg1, arg2), tf.float32)
 
 class ChatBotModel():
 
@@ -493,6 +503,9 @@ class ChatBotModel():
     def add_test_metric(self, metric):
         self.test_metrics.append(metric)
 
+    def __call__(self, *args, **kwargs):
+        return self.model(args, **kwargs)
+
     @tf.function()
     def train_step(self, X, Y):
 
@@ -511,6 +524,8 @@ class ChatBotModel():
         for metric in self.train_metrics:
             metric.update_state(Y, logits, sample_weight = loss_weights)
 
+        return loss
+
     @tf.function()
     def test_step(self, X, Y):
 
@@ -520,42 +535,41 @@ class ChatBotModel():
             metric.update_state(Y, logits, sample_weight = loss_weights)
 
     @tf.function()
-    def predict(self, X, temperature):
-        
-        logits, weights = self.model(X, training = False)
-        logits = logits + (1. - weights) * -1e9
-        autoregressive_inf =  logits[:,-1,:]/temperature
+    def get_probabilities(self, logits, weights, temperature = 1.0):
 
-        probs = tf.nn.softmax(autoregressive_inf, axis = -1)
-
-        return probs        
-
-    @tf.function()
-    def predict(self, X, temperature):
-        
-        logits, weights = self.model(X, training = False)
-        logits = logits + tf.expand_dims((1. - weights) * -1e9, -1)
-        autoregressive_inf =  logits[:,-1,:]/temperature
+        logits = logits/temperature + tf.expand_dims((1. - weights) * -65504, -1)
+        autoregressive_inf =  logits
 
         probs = tf.nn.softmax(autoregressive_inf, axis = -1)
 
         return probs
 
-    def respond(self, context, sender, author, response_len, temperature = 0.8):
+    def respond(self, context, sender, author, response_len, cutoff = None, temperature = 1.0):
         
         assert(context.shape[0] == 1), 'Inference only works with batch size of 1'
+        if cutoff is None:
+            cutoff = response_len
 
         response = [[1]]
         idx = 0
 
         author_id = author[0]
 
-        for i in range(response_len):
+        encoded_context, context_attn_mask = self.model.encode_context(context, sender, training = False)
+
+        for i in range(cutoff):
             
             padded_response = tf.keras.preprocessing.sequence.pad_sequences(response, response_len)
             padded_author = tf.keras.preprocessing.sequence.pad_sequences(author, response_len)
-            probs = self.predict((context, sender, padded_response, padded_author), temperature)[0].numpy()
+            
+            output_logits, loss_weights = self.model.decode_response(
+                padded_response, 
+                padded_author, 
+                encoded_context, context_attn_mask, 
+                training = False)
 
+            probs = self.get_probabilities(output_logits, loss_weights, temperature= temperature).numpy()[0,0]
+            
             idx = np.random.choice(len(probs), p = probs)
             response = tf.concat([response, [[idx]]], axis = -1)
             author = tf.concat([author, [author_id]], axis = -1)
