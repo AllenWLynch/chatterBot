@@ -4,3 +4,5 @@ spark-warehouse/
 spm/
 w2v_embeddings.npy
 w2v_model
+checkpoints/
+logs/

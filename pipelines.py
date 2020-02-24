@@ -66,11 +66,17 @@ def read_example(context_len, json_str):
 
     padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(sequences, context_len)
 
-    return padded_sequences[0], padded_sequences[1], [x['author_id'][0]], '\n'.join(x['tweets'])
+    context_str = '\n'.join(['<{}>: {}'.format(sender, tweet) for sender, tweet in zip(x['sender'], x['tweets'])]) + '\nResponse: '
+
+    return padded_sequences[0], padded_sequences[1], [x['author_id'][0]], context_str
 
 def process_example(context_len, textline):
 
     return tf.py_function(read_example, [context_len, textline], (tf.int32, tf.int32, tf.int32, tf.string))
+
+def inference_group_xy(context, sender, author_id, context_str):
+
+    return (context, sender, author_id), context_str
 
 def example_stream(test_dir, context_len):
 
@@ -81,6 +87,8 @@ def example_stream(test_dir, context_len):
     dataset = dataset.interleave(lambda filename : 
         tf.data.TextLineDataset(filename).map(lambda x : process_example(context_len, x))
     )
+
+    dataset = dataset.map(lambda *x : inference_group_xy(*x), num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
     dataset = dataset.repeat().shuffle(50)
 
