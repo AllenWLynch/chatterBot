@@ -72,6 +72,8 @@ class ChatBotTrainer():
         for metric in self.train_metrics:
             metric.update_state(Y, logits, sample_weight = loss_weights)
 
+        return loss, gradients
+
     @tf.function()
     def test_step(self, X, Y):
 
@@ -83,10 +85,7 @@ class ChatBotTrainer():
     @tf.function()
     def get_probabilities(self, logits, weights, temperature = 1.0):
 
-        logits = logits/temperature + tf.expand_dims((1. - weights) * -65504, -1)
-        autoregressive_inf =  logits
-
-        probs = tf.nn.softmax(autoregressive_inf, axis = -1)
+        probs = tf.nn.softmax(logits/temperature, axis = -1)
 
         return probs
 
@@ -117,7 +116,7 @@ class ChatBotTrainer():
                 encoded_context, context_attn_mask, 
                 training = False)
 
-            probs = self.get_probabilities(output_logits, loss_weights, temperature= temperature).numpy()[0,0]
+            probs = self.get_probabilities(output_logits, loss_weights, temperature= temperature).numpy()[0,-1]
             
             idx = np.random.choice(len(probs), p = probs)
             response = tf.concat([response, [[idx]]], axis = -1)
@@ -128,19 +127,25 @@ class ChatBotTrainer():
 
         return self.decoder.DecodeIds(response.numpy()[0].tolist())
     
-    def train_epoch(self, steps, dataset, log_frequency = 50):
+    def train_epoch(self, steps, dataset, log_frequency = 50, debugging = False):
 
         for i, (X, Y) in enumerate(dataset.take(steps)):
 
             print('\rStep {}/{}'.format(str(i + 1), str(steps)), end = '')
 
-            self.train_step(X,Y)
+            loss, grads = self.train_step(X,Y)
 
             if i % log_frequency == 0:
                 with self.logger.as_default():
                      for train_metric in self.train_metrics:
-                         tf.summary.scalar(train_metric.name, train_metric.result(), step = self.train_steps)
+                         tf.summary.scalar(train_metric.name, train_metric.result()/log_frequency, step = self.train_steps)
                          train_metric.reset_states()
+
+                if debugging:
+                    weight_norms = [tf.norm(w) for w in self.model.trainable_weights]
+                    max_idx = np.argmax(weight_norms)
+                    print('Maxnorm: {}, {}'.format(self.model.trainable_weights[max_idx].name, str(weight_norms[max_idx])))
+
 
             self.train_steps = self.train_steps + 1
         print('')
@@ -156,7 +161,7 @@ class ChatBotTrainer():
 
         with self.logger.as_default():
             for test_metric in self.test_metrics:
-                tf.summary.scalar(test_metric.name, test_metric.result(), step = self.eval_steps)
+                tf.summary.scalar(test_metric.name, test_metric.result()/steps, step = self.eval_steps)
                 test_metric.reset_states()
 
         print('')
@@ -179,12 +184,12 @@ class ChatBotTrainer():
 
     def fit(self, train_dataset, test_dataset, inference_dataset,
                 epochs = 100, steps_per_epoch = 10000, evaluation_steps = 100, checkpoint_every = 5,
-                logfreq = 50, num_samples = 3, temperature = 0.9, inference_length_cutoff = 30):
+                logfreq = 50, num_samples = 3, temperature = 0.9, inference_length_cutoff = 30, debugging = False):
 
         for epoch in range(epochs):
             print('EPOCH ', epoch + 1)
             
-            self.train_epoch(steps_per_epoch, train_dataset, logfreq)
+            self.train_epoch(steps_per_epoch, train_dataset, logfreq, debugging= debugging)
 
             self.evaluate(evaluation_steps, test_dataset)
 
