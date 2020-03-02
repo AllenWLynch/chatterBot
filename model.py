@@ -183,13 +183,14 @@ class FCNNLayer(tf.keras.layers.Layer):
 
 
 #%%
-class CausalSeperable1DConv(tf.keras.layers.Layer):
+class Seperable1DConv(tf.keras.layers.Layer):
 
-    def __init__(self, output_depth, kernel_width, activation = 'relu', **kwargs):
+    def __init__(self, output_depth, kernel_width, padding_type = 'causal', activation = 'relu', **kwargs):
         super().__init__(**kwargs)
         self.output_depth = output_depth
         self.kernel_width = kernel_width
         self.activation = activation
+        self.padding_type = padding_type
 
     def build(self,input_shape):
         assert(len(input_shape) == 3), 'Must be (m, Tx, d_model)'
@@ -197,8 +198,12 @@ class CausalSeperable1DConv(tf.keras.layers.Layer):
 
         self.seperable_conv = tf.keras.layers.SeparableConv2D(self.output_depth, (1, self.kernel_width), 
                 strides = 1, padding = 'valid', activation = self.activation, use_bias = False)
-
-        self.padding = tf.keras.layers.ZeroPadding1D((self.kernel_width - 1, 0))
+        
+        if self.padding_type == 'causal':
+            self.padding = tf.keras.layers.ZeroPadding1D((self.kernel_width - 1, 0))
+        else:
+            flank = (self.kernel_width - 1)//2
+            self.padding = tf.keras.layers.ZeroPadding1D((flank, flank))
 
     def call(self, X, conv_mask):
 
@@ -214,7 +219,7 @@ class CausalSeperable1DConv(tf.keras.layers.Layer):
 
 class EncoderLayer(tf.keras.layers.Layer):
     
-    def __init__(self, dff = 2048, conv_width = (7,9), heads = 8, fcnn_dropout = 0.1, 
+    def __init__(self, dff = 2048, conv_width = 7, heads = 8, fcnn_dropout = 0.1, 
             attn_dropout = 0.1, max_relative_distance = 24, **kwargs):
         super().__init__(**kwargs)
         self.h = heads
@@ -223,6 +228,7 @@ class EncoderLayer(tf.keras.layers.Layer):
         self.attn_dropout = attn_dropout
         self.conv_width = conv_width
         self.max_relative_distance = max_relative_distance
+        self.padding_type = 'wide'
         
     def build(self, input_shape):
         assert(len(input_shape) == 3), 'Expected input shape of (m, Tx, d)'
@@ -231,8 +237,8 @@ class EncoderLayer(tf.keras.layers.Layer):
         
         self.projected_dim = self.d_model//self.h
 
-        self.conv1 = CausalSeperable1DConv(self.d_model, self.conv_width[0])
-        self.conv2 = CausalSeperable1DConv(self.d_model, self.conv_width[1])
+        self.conv1 = Seperable1DConv(self.d_model, self.conv_width, padding_type = self.padding_type)
+        self.conv2 = Seperable1DConv(self.d_model, self.conv_width, padding_type = self.padding_type)
         self.self_attn = AttentionLayer(self.projected_dim, dropout = self.attn_dropout, heads = self.h, max_relative_distance = self.max_relative_distance)
         self.fc = FCNNLayer(self.d_model, self.dff, dropout = self.fcnn_dropout)
 
@@ -261,6 +267,7 @@ class DecoderLayer(EncoderLayer):
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.padding_type = 'causal'
         
     def build(self, input_shape):
         super().build(input_shape)
@@ -325,7 +332,7 @@ class HighwayCNNLayer(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         (m, tx, d_model)= input_shape
-        self.cnn = CausalSeperable1DConv(d_model, self.kernel_width)
+        self.cnn = Seperable1DConv(d_model, self.kernel_width, padding_type='causal')
         self.highway = HighwayLayer(self.dropout_rate)
 
     def call(self, X, mask):
@@ -376,9 +383,6 @@ class RepresentationLayers(tf.keras.layers.Layer):
 
         self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers + 1, self.d_model, mask_zero = True)
         self.shared_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_shared_layers)]
-        
-        self.context_embedding = self.add_weight(shape = (1,1,self.d_model), name = 'context_embedding')
-        self.response_embedding = self.add_weight(shape = (1,1,self.d_model), name= 'response_embedding')
 
         self.dropout = tf.keras.layers.Dropout(self.embedding_dropout)
 
@@ -386,26 +390,14 @@ class RepresentationLayers(tf.keras.layers.Layer):
 
         X, attn_mask, padding_mask, conv_mask = self.word_embedder(X, attn_precursor_mask) 
 
-        X = X * tf.math.sqrt(tf.cast(self.d_model, tf.float32))
-
-        X = X + self.speaker_embedder(sender)
-
-        X = tf.cast(X, tf.float16)
-
-        X = 1/3 * tf.multiply(
-            conv_mask, 
-            tf.cond(tf.constant(is_context, dtype = tf.bool), 
-                lambda : tf.add(X, self.context_embedding), 
-                lambda : tf.add(X, self.response_embedding))
-        )
-
         X = self.dropout(X)
 
         for highway_layer in self.highway_layers:
             X = highway_layer(X, conv_mask)
 
-        for i, shared_layer in enumerate(self.shared_layers):
-            X = shared_layer(X, attn_mask, conv_mask, training = training)
+        X = X * tf.math.sqrt(tf.cast(self.d_model, tf.float16))
+
+        X = X + self.speaker_embedder(sender)
 
         return X, attn_mask, padding_mask, conv_mask
 

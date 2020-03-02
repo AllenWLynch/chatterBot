@@ -40,6 +40,8 @@ class ChatBotTrainer():
             except Exception as err:
                 print('Failed to load models from checkpoint!')
                 raise err
+        
+        self.logdir = log_dir
 
         self.checkpoint_manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=5)
 
@@ -186,8 +188,9 @@ class ChatBotTrainer():
                 epochs = 100, steps_per_epoch = 10000, evaluation_steps = 100, checkpoint_every = 5,
                 logfreq = 50, num_samples = 3, temperature = 0.9, inference_length_cutoff = 30, debugging = False):
 
+        print('Open tensorboard to "{}" to monitor training'.format(self.logdir))
         for epoch in range(epochs):
-            print('EPOCH ', epoch + 1)
+            print('\nEPOCH ', epoch + 1)
             
             self.train_epoch(steps_per_epoch, train_dataset, logfreq, debugging= debugging)
 
