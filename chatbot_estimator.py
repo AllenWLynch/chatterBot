@@ -37,6 +37,7 @@ class ChatBotTrainer():
         if load_from_checkpoint:
             try:
                 checkpoint.restore(tf.train.latest_checkpoint(checkpoint_dir)).assert_consumed()
+                print("Restored from checkpoint")
             except Exception as err:
                 print('Failed to load models from checkpoint!')
                 raise err
@@ -85,7 +86,7 @@ class ChatBotTrainer():
             metric.update_state(Y, logits, sample_weight = loss_weights)
 
     @tf.function()
-    def get_probabilities(self, logits, weights, temperature = 1.0):
+    def get_probabilities(self, logits, temperature = 1.0):
 
         probs = tf.nn.softmax(logits/temperature, axis = -1)
 
@@ -112,13 +113,13 @@ class ChatBotTrainer():
             padded_response = tf.keras.preprocessing.sequence.pad_sequences(response, response_len)
             padded_author = tf.keras.preprocessing.sequence.pad_sequences(author, response_len)
             
-            output_logits, loss_weights = self.model.decode_response(
+            output_logits, _ = self.model.decode_response(
                 padded_response, 
                 padded_author, 
                 encoded_context, context_attn_mask, 
                 training = False)
 
-            probs = self.get_probabilities(output_logits, loss_weights, temperature= temperature).numpy()[0,-1]
+            probs = self.get_probabilities(output_logits, temperature= temperature).numpy()[0,-1]
             
             idx = np.random.choice(len(probs), p = probs)
             response = tf.concat([response, [[idx]]], axis = -1)
@@ -169,7 +170,7 @@ class ChatBotTrainer():
         print('')
         self.eval_steps = self.eval_steps + 1
 
-    def show_inference_samples(self, dataset, num_samples, max_sample_length, temperature):
+    def show_inference_samples(self, dataset, num_samples, max_sample_length, temperature, to_tensorboard=True):
 
         samples = []
         for (X, context) in dataset.take(num_samples):
@@ -179,8 +180,9 @@ class ChatBotTrainer():
 
         sample_str = str('\n\n'.join(["__Sample_{}________\n{}".format(str(i + 1), sample) for i, sample in enumerate(samples)]))
 
-        with self.logger.as_default():
-            tf.summary.text('Response samples', sample_str, step = self.eval_steps)
+        if to_tensorboard:
+            with self.logger.as_default():
+                tf.summary.text('Response samples', sample_str, step = self.eval_steps)
         print(sample_str)
 
 
@@ -205,11 +207,11 @@ class ChatBotTrainer():
         print('Training complete! Saving final model.')
         self.checkpoint_manager.save()
         
-    def prompt_for_save(self, checkpoint_manager):
+    def prompt_for_save(self):
         print('Training interupted!')
         user_input = ''
         while not (user_input == 'y' or user_input == 'n'):
             user_input = input('Save model\'s current state?: [y/n]')
         if user_input == 'y':
-            checkpoint_manager.save()
+            self.checkpoint_manager.save()
             print('Saved checkpoint!')

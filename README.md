@@ -62,6 +62,16 @@ To reduce the space needed to train this model, I trained with mixed precision. 
 
 On a Azure DSVM instance with a single P40 GPU, I used a batch size of 256, and an initial learning rate of 0.001 that decayed with the inverse square of the step after 10000 warm-up steps.
 
-### Results
+# Results
 
-Training is ongoing at this moment! I estimate the generative model will need to train for 15 days to make interesting responses, so I am spinning up for training when I don't need my computer for anything else.
+Training is ongoing at this moment! I estimate the generative model will need to train for 15 days to make interesting responses, so I am spinning up for training when I don't need my computer for anything else. So far we're at 5 full days of training and chatbot responses are not interesting/thoughtful as of yet. Train and test losses plunge promisingly downward. The problem of short/safe responses is already revealing itself, as the stop token that truncates the response is selected with high probability after one or two words in the response. Ultimately, this generative chatbot may never produce interesting responses, but will provide rich contextual embeddings for the selective portion of the model.
+
+<hr>
+Chatbot Samples:<br>
+Tweet: So sad how BAD @116988 customer service went from best to worst. India agents have no clue and screw up everything. <br>
+Response: <@usr> Why
+<br><br>
+Tweet: @115850 now confused,same product showing two prices same time. Have already paid 2099 in one of the order thinking I am paying ~978 https://t.co/SyCN5cKH23 <br>
+Response: <@usr> Lol
+<hr>
+<img src="readme_materials/training_progress.png">

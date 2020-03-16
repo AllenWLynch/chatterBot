@@ -340,35 +340,31 @@ class HighwayCNNLayer(tf.keras.layers.Layer):
 
 #%%
 
-class MaskEmbedder(tf.keras.layers.Layer):
+class Masker(tf.keras.layers.Layer):
 
-    def __init__(self, embedding_layer, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.embedding_layer = embedding_layer
 
-    def call(self, inputs, mask):
+    def call(self, padding_mask, raw_attn_mask):
 
-        X = self.embedding_layer(inputs)
+        loss_mask = tf.cast(padding_mask, tf.float16)
 
-        loss_mask = tf.cast(self.embedding_layer.compute_mask(inputs), tf.float16)
+        attn_mask = loss_mask[:,tf.newaxis,tf.newaxis,:]
 
-        padding_mask = loss_mask[:,tf.newaxis,tf.newaxis,:]
+        attn_mask = tf.math.multiply(tf.cast(raw_attn_mask, tf.float16), attn_mask)
 
-        attn_mask = tf.math.multiply(tf.cast(mask, tf.float16), padding_mask)
-
-        return X, attn_mask, padding_mask, tf.expand_dims(loss_mask, -1)
+        return attn_mask, tf.expand_dims(loss_mask, -1)
 
 #%%
 
 class RepresentationLayers(tf.keras.layers.Layer):
 
     def __init__(self, embedding_layer, d_model, num_speakers, num_highway_layers, 
-            num_shared_layers, transformer_layer_kwargs, embedding_dropout = 0.1, highway_dropout = 0.1,  **kwargs):
+            transformer_layer_kwargs, embedding_dropout = 0.1, highway_dropout = 0.1,  **kwargs):
 
         super().__init__(**kwargs)
         self.embedding_layer = embedding_layer
         self.num_highway_layers = num_highway_layers
-        self.num_shared_layers = num_shared_layers
         self.transformer_layer_kwargs = transformer_layer_kwargs
         self.num_speakers = num_speakers
         self.d_model = d_model
@@ -377,18 +373,20 @@ class RepresentationLayers(tf.keras.layers.Layer):
 
     def build(self, input_shape):
         
-        self.word_embedder = MaskEmbedder(self.embedding_layer)
+        #self.word_embedder = MaskEmbedder(self.embedding_layer)
+        self.mask_maker = Masker()
 
         self.highway_layers = [HighwayCNNLayer(7, self.highway_dropout) for i in range(self.num_highway_layers)]
 
         self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers + 1, self.d_model, mask_zero = True)
-        self.shared_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_shared_layers)]
 
         self.dropout = tf.keras.layers.Dropout(self.embedding_dropout)
 
-    def call(self, X, sender, is_context, attn_precursor_mask, training = True):
+    def call(self, X, sender, attn_precursor_mask, training = True):
 
-        X, attn_mask, padding_mask, conv_mask = self.word_embedder(X, attn_precursor_mask) 
+        X, padding_mask = self.embedding_layer(X), self.embedding_layer.compute_mask(X)
+        
+        attn_mask, conv_mask = self.mask_maker(padding_mask, attn_precursor_mask)
 
         X = self.dropout(X)
 
@@ -397,9 +395,9 @@ class RepresentationLayers(tf.keras.layers.Layer):
 
         X = X * tf.math.sqrt(tf.cast(self.d_model, tf.float16))
 
-        X = X + self.speaker_embedder(sender)
+        X = X + tf.cast(self.speaker_embedder(sender), tf.float16)
 
-        return X, attn_mask, padding_mask, conv_mask
+        return X, attn_mask, conv_mask
 
 class Transformer(tf.keras.Model):
 
@@ -409,8 +407,7 @@ class Transformer(tf.keras.Model):
         d_model = 512,
         num_encoder_layers = 1, 
         num_decoder_layers = 6, 
-        num_highway_layers = 2, 
-        num_shared_layers = 4, 
+        num_highway_layers = 2,
         embedding_dropout = 0.1,
         highway_dropout = 0.1,
         transformer_layer_kwargs = dict(),
@@ -421,7 +418,6 @@ class Transformer(tf.keras.Model):
         self.num_speakers = num_speakers
         self.num_decoder_layers = num_decoder_layers
         self.num_encoder_layers = num_encoder_layers
-        self.num_shared_layers = num_shared_layers
         self.num_highway_layers = num_highway_layers
         self.d_model = d_model
         self.highway_dropout = highway_dropout
@@ -440,11 +436,12 @@ class Transformer(tf.keras.Model):
         (m, t_r) = input_shape[2]
         
         self.lookahead_mask = tf.linalg.band_part(tf.ones((t_r, t_r)), -1, 0)[tf.newaxis, tf.newaxis, :, :]
+        self.context_precursor_mask = tf.ones((t_c, t_c))[tf.newaxis, tf.newaxis, :, :]
         ##
         self.embedding_layer = tf.keras.layers.Embedding(self.num_subwords, self.d_model, mask_zero = True, trainable = False)
  
         self.representation_model = RepresentationLayers(self.embedding_layer, self.d_model, self.num_speakers, self.num_highway_layers, 
-            self.num_shared_layers, self.transformer_layer_kwargs, highway_dropout = self.highway_dropout, embedding_dropout = self.embedding_dropout)
+            self.transformer_layer_kwargs, highway_dropout = self.highway_dropout, embedding_dropout = self.embedding_dropout)
         
         self.encoder_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_encoder_layers)]
 
@@ -453,17 +450,17 @@ class Transformer(tf.keras.Model):
     @tf.function()
     def encode_context(self, context, sender, training = True):
 
-        context, _, padding_attn_mask, conv_mask = self.representation_model(context, sender, True, self.lookahead_mask, training = training)
+        context, attn_mask, conv_mask = self.representation_model(context, sender, self.context_precursor_mask, training = training)
         
         for encoder_layer in self.encoder_layers:
-            context = encoder_layer(context, padding_attn_mask, conv_mask, training = training)
+            context = encoder_layer(context, attn_mask, conv_mask, training = training)
 
-        return context, padding_attn_mask
+        return context, attn_mask
 
     @tf.function()
     def decode_response(self, response, author, context, context_attn_mask, training = True):
 
-        response, lookahead_attn_mask, _, conv_mask = self.representation_model(response, author, False, self.lookahead_mask, training = training)
+        response, lookahead_attn_mask, conv_mask = self.representation_model(response, author, self.lookahead_mask, training = training)
 
         for decoder_layer in self.decoder_layers:
             response = decoder_layer(response, context, lookahead_attn_mask, context_attn_mask, conv_mask, training = training)
@@ -489,17 +486,18 @@ class Transformer(tf.keras.Model):
 # %%
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
     
-    def __init__(self, initial_lr, warmup_steps=5000):
+    def __init__(self, initial_lr, warmup_steps=10000, step_reduction = 10):
         super(CustomSchedule, self).__init__()
 
-        self.warmup_steps = warmup_steps
+        self.warmup_steps = max(warmup_steps, step_reduction)
         self.initial_lr = tf.cast(initial_lr, tf.float32)
+        self.step_reduction = step_reduction
     
     def __call__(self, step):
-        return tf.cond(step < self.warmup_steps, lambda : self.initial_lr, lambda : tf.math.rsqrt(step) * self.initial_lr)
+        return tf.cond(step < self.warmup_steps, lambda : self.initial_lr, lambda : tf.math.rsqrt(step/self.step_reduction) * self.initial_lr)
 
-def TransformerOptimizer(initial_lr):
+def TransformerOptimizer(initial_lr, **kwargs):
 
-    adam_opt = tf.keras.optimizers.Adam(CustomSchedule(initial_lr), beta_1=0.9, beta_2=0.98, epsilon=1e-9)
+    adam_opt = tf.keras.optimizers.Adam(CustomSchedule(initial_lr, **kwargs), beta_1=0.9, beta_2=0.98, epsilon=1e-9)
 
     return mixed_precision.LossScaleOptimizer(adam_opt, loss_scale = 'dynamic')

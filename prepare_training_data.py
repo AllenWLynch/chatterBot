@@ -8,6 +8,7 @@ import data_utils
 import importlib
 import os
 import random
+import re
 
 #%%
 data_utils = importlib.reload(data_utils)
@@ -29,6 +30,9 @@ class MultiFileLineGenerator():
 #%%
 sp = spm.SentencePieceProcessor()
 sp.Load("./model_components/spm/sentpiece_model.model")
+
+SPANISH_WORDS = ['el','de','del','que','porque','tu','la','pero','mi','en']
+SPANISH_REs = re.compile(r'\b({})\b'.format('|'.join(SPANISH_WORDS)), re.IGNORECASE)
 
 #%%
 class BadDataException(Exception):
@@ -64,6 +68,11 @@ def transform(conversation_obj):
     data['author_id'] = [binarize_author_id(data_utils.encode_authors(data['author_id']))]*len(data['encoded_response'])
 
     data['encoded_tweet'] = [_id for tweet in data['encoded_tweet'] for _id in tweet]
+
+    
+    is_english = not re.search(SPANISH_REs, x['response']) is None
+    if not is_english:
+        
 
     return data
 
