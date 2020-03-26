@@ -486,14 +486,16 @@ class Transformer(tf.keras.Model):
 # %%
 class CustomSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
     
-    def __init__(self, initial_lr, warmup_steps=10000, step_reduction = 10):
+    def __init__(self, initial_lr, warmup_steps=10000, step_reduction = 10, initial_step = 0):
         super(CustomSchedule, self).__init__()
 
         self.warmup_steps = max(warmup_steps, step_reduction)
         self.initial_lr = tf.cast(initial_lr, tf.float32)
         self.step_reduction = step_reduction
+        self.initial_step = initial_step
     
     def __call__(self, step):
+        step += self.initial_step
         return tf.cond(step < self.warmup_steps, lambda : self.initial_lr, lambda : tf.math.rsqrt(step/self.step_reduction) * self.initial_lr)
 
 def TransformerOptimizer(initial_lr, **kwargs):

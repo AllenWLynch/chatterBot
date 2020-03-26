@@ -84,7 +84,7 @@ if __name__ == "__main__":
     chatbot = chatbot_estimator.ChatBotTrainer(
         subword_processor, 
         chatbot_model, 
-        model.TransformerOptimizer(0.001, warmup_steps = 0), 
+        model.TransformerOptimizer(0.001, warmup_steps = 0, initial_step = 1e6, step_reduction = 10), 
         load_from_checkpoint = True)
 
     chatbot.add_train_metric(tf.keras.metrics.SparseCategoricalCrossentropy(name = '[Train] Sparse Categorical Crossentropy', from_logits=True))

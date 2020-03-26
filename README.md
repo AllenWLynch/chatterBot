@@ -75,3 +75,13 @@ Tweet: @115850 now confused,same product showing two prices same time. Have alre
 Response: <@usr> Lol
 <hr>
 <img src="readme_materials/training_progress.png">
+
+#### Catastrophe! A windows update killed my training routine and restarting the model does not lead to further reduction in training loss. This is likely because the ADAM optimizer's weight-specific gradient variables were not saved, so the optimizer lost momentum and is stuck in some minima. I'll have to retrain from scratch.
+
+# Conversation Strategy
+
+Once the generative model is done training, I could use a number of sampling techniques to generate high quality responses. The main requirement of the chosen sampling technique is that it must promote longer responses than I am observing from the model right now. 
+
+I plan to test and compare two response-generating strategies:
+1. Beam Search -> Concurrently grows multiple hypotheses to maximize P(Y|X)
+2. Sample and Rank -> Recently shown to produce good results with Google's Meena chatbot. A simple method where many replies are generated, then ranked on some non-differentiable metric to choose the best response.
