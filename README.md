@@ -78,6 +78,8 @@ Response: <@usr> Lol
 
 #### Catastrophe! A windows update killed my training routine and restarting the model does not lead to further reduction in training loss. This is likely because the ADAM optimizer's weight-specific gradient variables were not saved, so the optimizer lost momentum and is stuck in some minima. I'll have to retrain from scratch.
 
+Given this setback, I am going to wait to train until I have more compute resources at my disposal for training. I will likely rent time on a cloud VM.
+
 # Conversation Strategy
 
 Once the generative model is done training, I could use a number of sampling techniques to generate high quality responses. The main requirement of the chosen sampling technique is that it must promote longer responses than I am observing from the model right now. 
