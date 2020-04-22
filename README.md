@@ -1,27 +1,27 @@
-# ChatterBot: Jointly Generative and Selective Transformer Chatbot
+# ChatterBot: Pretrained Generative Transformers for Selective Chatbot
 
 ## Description
 
-Fundamentally, a generative chatbot can be constructed using the same techniques and architectures as a neural machine translation problem. The conversation is *encoded* into a context, then that context is *decoded* into a new reply which is constructed auto-regressively using a conditioned language model. Previously, the go-to architecture for modeling these seq2seq-style problems was the RNN, then RNN+attention, and now the fully-attentive Transformer. Generative chatbots can produce novel response to novel context if trained on enough data, but are prone to generic responses. Additionally, the language they use is a reflection of their corpus, which can be problematic if trained on a corpus like Reddit text, and they are not well-suited for task-oriented conversations.
+Recent advancements in seq2seq models, specifically the Transformer, have shown promise in creating an end-to-end chatbot solution. Google recently showed with Meena that an interesting conversant can be trained with a purely generative model, but its application in goal-oriented environments or specific domains remains illusive because of the massive amount of training data required. Also, with generative models, the owner cannot supply pre-existing responses, which opens them up to risk the chatbot might say something offensive or off topic. 
 
-The other category of chatbot is the Selective chatbot. This style of chatbot uses similarity scores between an embedded context and a database of candidate responses to choose the most appropriate response. This allows the designer to hand-craft dialogue and control how the bot interacts with users. Unfortunately, this means the conversation will never be original.
-
-Scoring candidate responses is itself an sequence-related problem, and could be concievably framed with a Transformer model acting as the embedding architecture from which to calculate similarity scores. Because the generative and selective chatbot formulations suggest the use of similar models and share a similar foundation in language understanding, I believe the tasks can be learned jointly to create a model that performs better on either task than trained seperately. 
-
-For example, the generative chatbot is essentially a language model, the underpinning of many recent successes in NLP transfer learning. This suggests a better selective chatbot may be built around or with a language model. Conversely, a strictly generative chatbot may be able to ad-lib, but will fail in task-oriented situtations. A hybid model which can choose from novel text and pre-made responses may improve user experience in this situation.
+Because of this, selective chatbots, which choose from an array of responses are more widely applicable. The goal of this project is to design an selective chatbot architecture that uses Transformers for more contextual-aware responses.
 
 ## Architecture
 
-My architecture is based off successful literature models. Specifically, I borrowed the the use of a larger decoder than encoder found to be successful in Google's Meena chatbot, the highway layers and convolutional layers in attention modules of QANet, and the multilayer concatenation used to construct high-dimensional embeddings found in ELMO. 
+My approach to incorporating context-aware Transformers into a selective chatbot relies on research that shows unsupervised pre-training of models on a general language modeling objective allows those models to be retrained for other tasks with high performance. Thus, to develop a model that can embed context and reponses with impotant contextutal information, I will pretrain two seq2seq Transformer models on a conversation corpus. One Transformer will encode the context and predict the response (the traditional se2seq method), and the other will encode the response and predict the context. This approach mimics the skip-gram approach to producing sentence embeddings, but uses Transformer encoders rather than RNNs. The specific architecture is shown below. I have incorporated a shared highway CNN layer to learn n-grams from subword tokens and speaker embeddings added to pretrained word-embeddings for representation.
+<br>
 
-Inputs to the model consist of context and response sequences, which share the same subword-embedding matrix and causal convolutional highway layers, and learn shared higher-order representations from input subwords. Next, learned speaker embeddings are added to the word representations to mark boundaries in conversations, and perhaps inject substitutable personality into the chatbot. These layered sequence representations are fed into the encoder and decoder layers of the Transformer seq2seq model with learned relative positional encodings, which outputs a distribution over the same shared subword matrix for next word selection.
+<img src="./readme_materials/generative_model.png" height='500px'><br>
+Figure 1A. Generative model. Shown encoding context to predict response.<br>
 
-The selective module of my chatbot takes as input the concatenation of the outputs of the first four layers of the decoder and encoder stacks, which creates a rich, high-dimensional representation of the context and response. As shown in ELMO, concatenation of successive layers of processing yields representations with a higher degree of diversity in the functions being modeled. The selective model is composed of transformer layers, and the output context/response embedding vectors are averages of the transformer output vectors, as in S-BERT, a powerful sentence comparison architecture. These embedding vectors are compared with cosine similarity, with likely context-response pairs being closer in cosine similarity than unlikely pairs. The triplet loss for the selective model and crossentropy loss for the generative model will be trained seperately. First, the generative portion of the model will be trained, during which it will learn meaningful representations for input to the selective model, then the generative model's weights will be frozen and the selective model trained. 
+In each generative model, the encoder stack is far more powerful than the decoder stack. This is because the encoder is the ultimate product of this training, and it forces the model to invest more in the richness of encoder embeddings to reduce training loss. 
 
-This dual-training scheme will yield complimentary models. The generative model will produce novel, but safe responses, while the selective model can both rate the generator's responses or choose curated responses from a database. Because the generative model supplies a rich, contextual input to the selective model, my selective model may be able to generalize to new response databases and use cases more easily than a selective model that is not joinly trained with a language model.
+With the two generative models trained, the encoders from each can be used to produce features for the selective model. The selective model takes as input the encoded context representation concatenated to the encoded response representaion. The typical cosine-similarity vector comparison in compatibility scoring is replaced by a Transformer encoder layer, followed by rolling up of the output matrix. Lastly, a Feed-forward layer reduces the embedding to a scalar compatibility score. The selective model is trained with the Triplet loss formula to ensure more compatible responses recieve higher scores. 
 
-<br><img src="readme_materials/architecture.png" width=750><br>
-Figure 1. Chatbot architecture.<br>
+<img src="readme_materials/selective_model.png" height='500px'>
+Figure 1B. Selective model.
+
+I predict this architecture will produce a highly generalizable and robust selective chatbot that can quickly select from an array of responses, while incorporating rich contextual information in its selection.
 
 ## Data
 
@@ -60,11 +60,10 @@ I used word2vec to obtain pre-trained word embeddings, which will be frozen duri
 
 To reduce the space needed to train this model, I trained with mixed precision. Weights, loss, and gradients were calculated in fp32, while forward propagation was calculated in fp16. I utilized dynamic loss scaling to prevent gradient underflow. Training metrics were recorded to a Tensorboard dashboard every 50 steps, and the model was evaluated on the test set using the same metrics at the end of every epoch. Additionally, samples of the model's response to test-set contexts were sampled and displayed every epoch. 
 
-On a Azure DSVM instance with a single P40 GPU, I used a batch size of 256, and an initial learning rate of 0.001 that decayed with the inverse square of the step after 10000 warm-up steps.
 
 # Results
 
-Training is ongoing at this moment! I estimate the generative model will need to train for 15 days to make interesting responses, so I am spinning up for training when I don't need my computer for anything else. So far we're at 5 full days of training and chatbot responses are not interesting/thoughtful as of yet. Train and test losses plunge promisingly downward. The problem of short/safe responses is already revealing itself, as the stop token that truncates the response is selected with high probability after one or two words in the response. Ultimately, this generative chatbot may never produce interesting responses, but will provide rich contextual embeddings for the selective portion of the model.
+Training is ongoing at this moment! I estimate that each generative model will need to train for 15 days to make interesting responses, so I am spinning up for training when I don't need my computer for anything else. So far we're at 5 full days of training and chatbot responses are not interesting/thoughtful as of yet. Train and test losses plunge promisingly downward. The problem of short/safe responses is already revealing itself, as the stop token that truncates the response is selected with high probability after one or two words in the response. Ultimately, this generative chatbot may never produce interesting responses, but will provide rich contextual embeddings for the selective portion of the model.
 
 <hr>
 Chatbot Samples:<br>
@@ -79,11 +78,3 @@ Response: <@usr> Lol
 #### Catastrophe! A windows update killed my training routine and restarting the model does not lead to further reduction in training loss. This is likely because the ADAM optimizer's weight-specific gradient variables were not saved, so the optimizer lost momentum and is stuck in some minima. I'll have to retrain from scratch.
 
 Given this setback, I am going to wait to train until I have more compute resources at my disposal for training. I will likely rent time on a cloud VM.
-
-# Conversation Strategy
-
-Once the generative model is done training, I could use a number of sampling techniques to generate high quality responses. The main requirement of the chosen sampling technique is that it must promote longer responses than I am observing from the model right now. 
-
-I plan to test and compare two response-generating strategies:
-1. Beam Search -> Concurrently grows multiple hypotheses to maximize P(Y|X)
-2. Sample and Rank -> Recently shown to produce good results with Google's Meena chatbot. A simple method where many replies are generated, then ranked on some non-differentiable metric to choose the best response.
