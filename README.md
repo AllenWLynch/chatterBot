@@ -8,20 +8,27 @@ Because of this, selective chatbots, which choose from an array of responses are
 
 ## Architecture
 
-My approach to incorporating context-aware Transformers into a selective chatbot relies on research that shows unsupervised pre-training of models on a general language modeling objective allows those models to be retrained for other tasks with high performance. Thus, to develop a model that can embed context and reponses with impotant contextutal information, I will pretrain two seq2seq Transformer models on a conversation corpus. One Transformer will encode the context and predict the response (the traditional se2seq method), and the other will encode the response and predict the context. This approach mimics the skip-gram approach to producing sentence embeddings, but uses Transformer encoders rather than RNNs. The specific architecture is shown below. I have incorporated a shared highway CNN layer to learn n-grams from subword tokens and speaker embeddings added to pretrained word-embeddings for representation.
+<div style="float:left;width:49%">
+<img src="readme_materials/architecture.png" height = "750px"><br>
+Figure 1. Transformer selective chatbot architecture
+</div>
+
+<div style="float:right;width:49%">
+<img src="readme_materials/encoder_layer.png" height = "750px"><br>
+Figure 2. Encoder layer arcitecture<br>
+</div>
+
+<div style="clear:both"></div>
 <br>
 
-<img src="./readme_materials/generative_model.png" height='500px'><br>
-Figure 1A. Generative model. Shown encoding context to predict response.<br>
+My approach to using the Transformer architecture is outlined in Figure 1. First, I employ word2vec embeddings for representation of the context and response sequences, which are then run through a shared highway CNN layer that serves to blend word embeddings with n-gram context. On top of these representations, speaker embeddings are added that encode the who authored each word in the sequences. 
 
-In each generative model, the encoder stack is far more powerful than the decoder stack. This is because the encoder is the ultimate product of this training, and it forces the model to invest more in the richness of encoder embeddings to reduce training loss. 
+Next, the context and response are passed through a powerful Transformer encoder blocks that extract important semantic information from each sequence. The architecture for each encoder block is shown in Figure 2, and incorportates depthwise-seperable convolutions and relative positional encodings, both shown to increase the effectiveness of the basic Transformer block pioneered in Vaswani, et al. 
 
-With the two generative models trained, the encoders from each can be used to produce features for the selective model. The selective model takes as input the encoded context representation concatenated to the encoded response representaion. The typical cosine-similarity vector comparison in compatibility scoring is replaced by a Transformer encoder layer, followed by rolling up of the output matrix. Lastly, a Feed-forward layer reduces the embedding to a scalar compatibility score. The selective model is trained with the Triplet loss formula to ensure more compatible responses recieve higher scores. 
+With the context and response processed by the encoder blocks, their representations are mixed in single Tranformer decoder block, which calculates context-response multi-headed attention. The rational behind this small decoder is that the response database is stored as encoded sequences. An incoming context sequence is also encoded. To select a response from the database, the "Regression Module" must compare encodings of every response for the given context, and it must do this quickly. 
 
-<img src="readme_materials/selective_model.png" height='500px'>
-Figure 1B. Selective model.
+Following the decoder block, the representation is averaged over time, and the flattened output linearly transformed to give a "compatibility score". Triplet loss training ensures compatible context-response pairs have higher scores.
 
-I predict this architecture will produce a highly generalizable and robust selective chatbot that can quickly select from an array of responses, while incorporating rich contextual information in its selection.
 
 ## Data
 
@@ -63,16 +70,8 @@ To reduce the space needed to train this model, I trained with mixed precision. 
 
 # Results
 
-Training is ongoing at this moment! I estimate that each generative model will need to train for 15 days to make interesting responses, so I am spinning up for training when I don't need my computer for anything else. So far we're at 5 full days of training and chatbot responses are not interesting/thoughtful as of yet. Train and test losses plunge promisingly downward. The problem of short/safe responses is already revealing itself, as the stop token that truncates the response is selected with high probability after one or two words in the response. Ultimately, this generative chatbot may never produce interesting responses, but will provide rich contextual embeddings for the selective portion of the model.
-
-<hr>
-Chatbot Samples:<br>
-Tweet: So sad how BAD @116988 customer service went from best to worst. India agents have no clue and screw up everything. <br>
-Response: <@usr> Why
+Training is ongoing at this moment! I estimate that each generative model will need to train for 15 days to make interesting responses, so I am spinning up for training when I don't need my computer for anything else. So far we're at 5 full days of training. Train and test losses plunge promisingly downward.
 <br><br>
-Tweet: @115850 now confused,same product showing two prices same time. Have already paid 2099 in one of the order thinking I am paying ~978 https://t.co/SyCN5cKH23 <br>
-Response: <@usr> Lol
-<hr>
 <img src="readme_materials/training_progress.png">
 
 #### Catastrophe! A windows update killed my training routine and restarting the model does not lead to further reduction in training loss. This is likely because the ADAM optimizer's weight-specific gradient variables were not saved, so the optimizer lost momentum and is stuck in some minima. I'll have to retrain from scratch.
