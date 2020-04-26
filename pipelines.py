@@ -63,7 +63,7 @@ def chatbot_datafeed(datadir, seq_len, response_len_threshold, batch_size, shuff
 
     return dataset
 
-test = chatbot_datafeed('./data/train_samples', 128, 70, 32)
+#test = chatbot_datafeed('./data/train_samples', 128, 70, 32)
 
 #%%
 
@@ -113,5 +113,5 @@ def example_stream(test_dir, context_len):
 
     return dataset
 
-test2 = example_stream('./data/test_samples',128)
+#test2 = example_stream('./data/test_samples',128)
 # %%

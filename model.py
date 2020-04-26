@@ -78,8 +78,6 @@ def dot_product_attn(q, k, v, r, len_q, mask = None):
     
     return context
 
-#%%
-
 
 class MultiHeadProjection(tf.keras.layers.Layer):
     
@@ -90,9 +88,9 @@ class MultiHeadProjection(tf.keras.layers.Layer):
         
     def build(self, input_shape):
          
-        assert(len(input_shape) == 3), 'Expected input of rank 3: (m, Tx, d_model)'
+        #assert(len(input_shape) == 3), 'Expected input of rank 3: (m, Tx, d_model)'
         
-        self.m, self.k, self.model_dim = input_shape
+        self.m, self.k, self.model_dim = input_shape[-3:]
         
         self.W = self.add_weight(
                 name = 'W',
@@ -102,13 +100,13 @@ class MultiHeadProjection(tf.keras.layers.Layer):
         
     def call(self, X):
         
-        X = tf.expand_dims(X, 1) # adds a head layer
+        X = tf.expand_dims(X, -3) # adds a head layer
         
         output = tf.matmul(X, self.W)
         
         return output
 
-#%%
+
 class AttentionLayer(tf.keras.layers.Layer):
    
     def __init__(self, projected_dim, max_relative_distance = 24, dropout = 0.1, heads = 8, **kwargs):
@@ -120,15 +118,16 @@ class AttentionLayer(tf.keras.layers.Layer):
         
     def build(self, input_shape):
         
-        for input_ in input_shape:
-            assert(len(input_) == 3), 'Expected input shape of (m, Tx, d)'
+        #for input_ in input_shape:
+            #assert(len(input_) == 3), 'Expected input shape of (m, Tx, d)'
         
         (self.projQ, self.projK, self.projV) = (MultiHeadProjection(self.projected_dim, self.h) 
                                        for input_ in input_shape)
         
         output_d = input_shape[-1][-1]
-        
-        self.reshaper = tf.keras.layers.Reshape(target_shape = (-1, self.projected_dim * self.h))
+        output_t = input_shape[0][-2]
+
+        self.reshaper = tf.keras.layers.Reshape(target_shape = (-1, output_t, self.projected_dim * self.h))
         
         self.dense = tf.keras.layers.Dense(output_d, bias_initializer='zeros')
 
@@ -137,6 +136,12 @@ class AttentionLayer(tf.keras.layers.Layer):
 
         self.positional_encoder = RelativePositionalEncoder(self.max_relative_distance)
         
+        if len(input_shape[-1]) > 3:
+            self.transposer = tf.keras.layers.Permute([1, 3, 2, 4])
+            self.extra_dim = True
+        else:
+            self.transposer = tf.keras.layers.Permute([2, 1, 3])
+            self.extra_dim = False
 
     def call(self, X, mask = None, training = True):
         '''
@@ -148,15 +153,16 @@ class AttentionLayer(tf.keras.layers.Layer):
         
         Q, K, V = self.projQ(Q), self.projK(K), self.projV(V)
                 
-        #print(Q.get_shape(), K.get_shape(), V.get_shape())
         R = self.positional_encoder((Q, K))
         
         attention = dot_product_attn(Q, K, V, R, self.projected_dim, mask = mask)
-        
-        #print(attention.get_shape())
-        attention = tf.transpose(attention, perm=[0, 2, 1, 3])
-        
+
+        attention = self.transposer(attention)
+
         flattened = self.reshaper(attention)
+
+        if not self.extra_dim:
+            flattened = tf.squeeze(flattened, axis = -3)
        
         output = self.dense(flattened)
 
@@ -165,7 +171,6 @@ class AttentionLayer(tf.keras.layers.Layer):
         return output
 
 #%%
-
 class FCNNLayer(tf.keras.layers.Layer):
     
     def __init__(self, d_model, dff, dropout = 0.1, **kwargs):
@@ -297,6 +302,49 @@ class DecoderLayer(EncoderLayer):
         X = X + self.fcnn_dropout_layer(self.fc(self.layer_norms[4](X)))
                 
         return X
+#%%
+class MixingAttentionLayer(EncoderLayer):
+    
+    def __init__(self, dff = 2048, heads = 8, fcnn_dropout = 0.1, 
+            attn_dropout = 0.1, max_relative_distance = 24, **kwargs):
+        super().__init__(**kwargs)
+        self.h = heads
+        self.fcnn_dropout = fcnn_dropout
+        self.dff = dff
+        self.attn_dropout = attn_dropout
+        self.max_relative_distance = max_relative_distance
+        
+    def build(self, input_shape):
+        assert(len(input_shape) == 3), 'Expected input shape of (m, Tx, d)'
+        
+        (self.m, self.k, self.d_model) = input_shape
+        
+        self.projected_dim = self.d_model//self.h
+
+        self.attn = AttentionLayer(self.projected_dim, dropout = self.attn_dropout, heads = self.h, max_relative_distance = self.max_relative_distance)
+        self.fc = FCNNLayer(self.d_model, self.dff, dropout = self.fcnn_dropout)
+
+        self.layer_norms = [InterconvertLayerNormLayer() for i in range(2)]
+        
+        self.attn_dropout_layer1 = tf.keras.layers.Dropout(self.attn_dropout)
+        self.fcnn_dropout_layer = tf.keras.layers.Dropout(self.fcnn_dropout)
+                
+    def call(self, X, key_output, key_mask, training = True):
+               
+        X = X + self.attn_dropout_layer1(
+            self.attn([self.layer_norms[0](X), key_output, key_output], mask = key_mask, training=training))
+        
+        X = X + self.fcnn_dropout_layer(self.fc(self.layer_norms[1](X)))
+                
+        return X
+
+#%%
+a = np.random.rand(3, 10, 64)
+b = np.random.rand(3,1, 12, 64)
+c = np.ones((3,1, 1,1,12))
+
+m = MixingAttentionLayer(dff = 16, heads = 2, max_relative_distance= 4)
+m(a, b, c)
 
 #%%
 
@@ -359,11 +407,11 @@ class Masker(tf.keras.layers.Layer):
 
 class RepresentationLayers(tf.keras.layers.Layer):
 
-    def __init__(self, embedding_layer, d_model, num_speakers, num_highway_layers, 
+    def __init__(self, d_model, num_subwords, num_speakers, num_highway_layers,
             transformer_layer_kwargs, embedding_dropout = 0.1, highway_dropout = 0.1,  **kwargs):
 
         super().__init__(**kwargs)
-        self.embedding_layer = embedding_layer
+        self.num_subwords = num_subwords
         self.num_highway_layers = num_highway_layers
         self.transformer_layer_kwargs = transformer_layer_kwargs
         self.num_speakers = num_speakers
@@ -375,6 +423,8 @@ class RepresentationLayers(tf.keras.layers.Layer):
         
         #self.word_embedder = MaskEmbedder(self.embedding_layer)
         self.mask_maker = Masker()
+
+        self.embedding_layer = tf.keras.layers.Embedding(self.num_subwords, self.d_model, mask_zero = True)
 
         self.highway_layers = [HighwayCNNLayer(7, self.highway_dropout) for i in range(self.num_highway_layers)]
 
@@ -399,6 +449,127 @@ class RepresentationLayers(tf.keras.layers.Layer):
 
         return X, attn_mask, conv_mask
 
+#%%
+class SelectiveChatbotModel(tf.keras.Model):
+
+    def __init__(self,
+        num_subwords = 8000, 
+        num_speakers = 2, 
+        d_model = 512,
+        num_encoder_layers = 4, 
+        num_highway_layers = 2,
+        embedding_dropout = 0.1,
+        highway_dropout = 0.1,
+        compatibility_dropout = 0.1,
+        transformer_layer_kwargs = dict(),
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.num_subwords = num_subwords
+        self.num_speakers = num_speakers
+        self.num_encoder_layers = num_encoder_layers
+        self.num_highway_layers = num_highway_layers
+        self.d_model = d_model
+        self.highway_dropout = highway_dropout
+        self.embedding_dropout = embedding_dropout
+        self.compatibility_dropout = compatibility_dropout
+        self.transformer_layer_kwargs = transformer_layer_kwargs
+
+    def build(self, input_shape):
+        assert(len(input_shape) == 4), 'Input must consist of (context, speaker, response, author) set.'
+        assert(input_shape[0] == input_shape[1]), 'context and speaker indexes must be same length'
+        assert(input_shape[2] == input_shape[3]), 'response and author indexes must be same length'
+        (m, tc) = input_shape[0]
+        (m, tr) = input_shape[2]
+
+        ## generate masks here
+        (m, t_c) = input_shape[0]
+        (m, t_r) = input_shape[2]
+        
+        #self.lookahead_mask = tf.linalg.band_part(tf.ones((t_r, t_r)), -1, 0)[tf.newaxis, tf.newaxis, :, :]
+        self.response_precursor_mask = tf.ones((t_r, t_r))[tf.newaxis, tf.newaxis, :, :]
+        self.context_precursor_mask = tf.ones((t_c, t_c))[tf.newaxis, tf.newaxis, :, :]
+         
+        self.representation_model = RepresentationLayers(self.d_model, self.num_subwords, self.num_speakers, self.num_highway_layers, 
+            self.transformer_layer_kwargs, highway_dropout = self.highway_dropout, embedding_dropout = self.embedding_dropout)
+        
+        self.context_encoder_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_encoder_layers)]
+
+        self.response_encoder_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_encoder_layers)]
+
+        self.mixer_layer = MixingAttentionLayer(**self.transformer_layer_kwargs)
+
+        self.dense_dropout = tf.keras.layers.Dropout(self.compatibility_dropout)
+        self.output_densor = tf.keras.layers.Dense(1, activation = 'sigmoid', dtype = tf.float32)
+
+    @tf.function()
+    def encode_context(self, context, sender, training = True):
+
+        context, attn_mask, conv_mask = self.representation_model(context, sender, self.context_precursor_mask, training = training)
+        
+        for encoder_layer in self.context_encoder_layers:
+            context = encoder_layer(context, attn_mask, conv_mask, training = training)
+
+        return context, attn_mask
+
+
+    @tf.function()
+    def encode_response(self, response, author, training = True):
+
+        response, attn_mask, conv_mask = self.representation_model(response, author, self.response_precursor_mask, training = training)
+        
+        for encoder_layer in self.response_encoder_layers:
+            response = encoder_layer(response, attn_mask, conv_mask, training = training)
+
+        return response, attn_mask
+
+    @tf.function()
+    def calculate_compatibility(self, response_encoding, context_encoding, context_mask, training = True):
+
+        context_encoding = tf.expand_dims(context_encoding, 1)
+        context_mask = tf.expand_dims(context_mask, 1)
+
+        mixed_representation = self.mixer_layer(response_encoding, context_encoding, context_mask, training = True)
+
+        mixed_representation = tf.reduce_mean(mixed_representation, axis = -2)
+
+        compatibility = self.output_densor(self.dense_dropout(mixed_representation, training = training))
+
+        return tf.squeeze(compatibility, axis = -1)
+
+    
+    def call(self, X, training = True):
+
+        (context, sender, response, author) = X
+
+        context_encoding, context_mask = self.encode_context(context, sender, training = training)
+
+        response_encoding, _ = self.encode_response(response, author, training = training)
+
+        return self.calculate_compatibility(response_encoding, context_encoding, context_mask, training = training)
+        
+    @tf.function()
+    def online_batchall_triplet_loss(self, compatibilities, margin):
+
+        B = compatibilities.get_shape()[0]
+
+        positives = tf.reshape(tf.linalg.diag_part(compatibilities), (-1, 1))
+
+        negatives_mask = 1. - tf.linalg.diag(tf.ones(B))
+
+        relevant_negatives = tf.where(compatibilities - positives + margin > 0, 1., 0.) * negatives_mask
+
+        ave_negative = tf.reduce_sum(compatibilities * relevant_negatives, axis = -1)/tf.reduce_sum(relevant_negatives, axis = -1)
+
+        ave_negative = tf.reshape(ave_negative, (-1, 1))
+
+        triplet_loss = tf.maximum(ave_negative - positives + margin, 0.)
+
+        return tf.reduce_mean(triplet_loss)
+
+
+
+#%%
 class Transformer(tf.keras.Model):
 
     def __init__(self, 
