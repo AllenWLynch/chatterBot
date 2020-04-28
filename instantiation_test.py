@@ -3,50 +3,63 @@ import tensorflow as tf
 import numpy as np
 from model import SelectiveChatbotModel, TransformerOptimizer
 from selective_chatbot_estimator import ChatBotTrainer
-import pipelines
-import sentencepiece
-#%%
+from pipeline import get_datafeed
+from config import DATA_DIR
+import os
+
+
 trans_kwargs = dict(
-    num_subwords=200,
-    num_speakers=2,
-    d_model = 64,
-    num_encoder_layers=1,
+    num_subwords=10007,
+    num_speakers=3,
+    d_model = 512,
+    embedding_dim = 300,
+    num_encoder_layers=3,
     num_highway_layers=1,
 )
 
-chatbot_model = SelectiveChatbotModel(**trans_kwargs)
-
-m, t, d = 3, 10, 64
-
-X = (
-    np.random.randint(1, 199, size = (1, t)),
-    np.random.randint(1,2, size= (1, t)),
-    np.random.randint(1, 199, size = (m, t)),
-    np.random.randint(1,2, size= (m, t)),
+trans_layer_kwargs = dict(
+    conv_width = 5,
+    dff = 1048,
+    heads = 8,
+    max_relative_distance = 24,
 )
 
-output = chatbot_model(X)
+#small shape for testing
+'''trans_kwargs = dict(
+    num_subwords=200,
+    num_speakers=3,
+    d_model = 64,
+    embedding_dim = 48,
+    num_encoder_layers=1,
+    num_highway_layers=1,
+)
+trans_layer_kwargs = dict(
+    conv_width = 5,
+    dff = 128,
+    heads = 4,
+    max_relative_distance = 4,
+)'''
 
-print("Output shape: ", output.shape)
+chatbot_model = SelectiveChatbotModel(**trans_kwargs, transformer_layer_kwargs = trans_layer_kwargs)
 
-train_pipeline = pipelines.chatbot_datafeed('./data/train_samples', t, 70, m)
-test_pipeline = pipelines.chatbot_datafeed('./data/test_samples', t, 70, m)
-
-#%%
-subword_processor = sentencepiece.SentencePieceProcessor()
-subword_processor.Load("./model_components/spm/sentpiece_model.model")
-
-#%%
 chatbot = ChatBotTrainer(
-        subword_processor, 
         chatbot_model, 
         TransformerOptimizer(0.001, warmup_steps = 10000, step_reduction = 10))
 
-#%%
+train_pipeline = get_datafeed(os.path.join(DATA_DIR, 'train_samples.csv'))
+test_pipeline = get_datafeed(os.path.join(DATA_DIR, 'test_samples.csv'))
 
-loss, _ = chatbot.train_step(X, 0.3)
+example = next(iter(train_pipeline))
 
-print(loss)
+chatbot.train_step(example, 0.5)
 
+chatbot.model.summary()
 
-# %%
+pre_trained_embeddings = np.load('./embedding_layer_weights.npy')
+
+chatbot.model.representation_model.embedding_layer.set_weights([pre_trained_embeddings])
+
+chatbot.fit(train_pipeline, test_pipeline,
+        epochs = 2, steps_per_epoch = 20, evaluation_steps = 20, checkpoint_every = 1,
+        logfreq = 1)
+

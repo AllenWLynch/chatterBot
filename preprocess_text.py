@@ -4,6 +4,9 @@ import bpemb
 import re
 import os
 from config import DATA_DIR
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+import json
+import numpy as np
 
 encoder = bpemb.BPEmb(lang = 'en', dim = 300, vs = 10000)
 
@@ -97,4 +100,39 @@ def preprocess(text):
 
     return id_encoded
 
+def binarize_author_id(id_):
+    binarized_id = int(id_ > 0) + 1
+    return binarized_id
+
+def transform(conversation_obj, sequence_length):
+
+    data = json.loads(conversation_obj)
+    
+    #process text to get id array
+    encoded_tweet = [preprocess(tweet) for tweet in data['tweets']]
+    
+    #replicate sender_ids and extend to match length of tweet encoding
+    sender_ids = [
+        sender_id
+        for sender, tweet in zip(data['sender'],encoded_tweet) 
+        for sender_id in [binarize_author_id(encode_authors(sender))] * len(tweet) 
+    ]
+    #flatten context
+    encoded_tweet = [_id for tweet in encoded_tweet for _id in tweet]
+
+    encoded_response = preprocess(data['response'])
+
+    if len(encoded_response) > 70:
+        raise BadDataException()
+
+    #replicate author_ids
+    author_ids = [binarize_author_id(encode_authors(data['author_id']))]*len(encoded_response)
+
+    sequences = [np.array(a) for a in (encoded_tweet, sender_ids, encoded_response, author_ids)]
+
+    sequences = pad_sequences(sequences, sequence_length)
+
+    sequences = sequences.reshape(-1)
+
+    return ','.join([str(num) for num in list(sequences)])
 # %%

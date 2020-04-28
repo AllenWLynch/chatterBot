@@ -6,3 +6,4 @@ w2v_embeddings.npy
 w2v_model
 checkpoints/
 logs/
+generative_model_stuff/

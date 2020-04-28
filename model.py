@@ -117,10 +117,7 @@ class AttentionLayer(tf.keras.layers.Layer):
         self.max_relative_distance = max_relative_distance
         
     def build(self, input_shape):
-        
-        #for input_ in input_shape:
-            #assert(len(input_) == 3), 'Expected input shape of (m, Tx, d)'
-        
+            
         (self.projQ, self.projK, self.projV) = (MultiHeadProjection(self.projected_dim, self.h) 
                                        for input_ in input_shape)
         
@@ -190,7 +187,7 @@ class FCNNLayer(tf.keras.layers.Layer):
 #%%
 class Seperable1DConv(tf.keras.layers.Layer):
 
-    def __init__(self, output_depth, kernel_width, padding_type = 'causal', activation = 'relu', **kwargs):
+    def __init__(self, output_depth, kernel_width, padding_type = 'wide', activation = 'relu', **kwargs):
         super().__init__(**kwargs)
         self.output_depth = output_depth
         self.kernel_width = kernel_width
@@ -217,7 +214,7 @@ class Seperable1DConv(tf.keras.layers.Layer):
         #m, w, nc -> m, h = 1, w, nc
         X = tf.expand_dims(X, 1)
         X = self.seperable_conv(X)
-        X = tf.squeeze(X, axis = 1)
+        X = tf.squeeze(X, axis = -3)
         return X
 
 #%%
@@ -339,12 +336,12 @@ class MixingAttentionLayer(EncoderLayer):
         return X
 
 #%%
-a = np.random.rand(3, 10, 64)
+'''a = np.random.rand(3, 10, 64)
 b = np.random.rand(3,1, 12, 64)
 c = np.ones((3,1, 1,1,12))
 
 m = MixingAttentionLayer(dff = 16, heads = 2, max_relative_distance= 4)
-m(a, b, c)
+m(a, b, c)'''
 
 #%%
 
@@ -360,13 +357,14 @@ class HighwayLayer(tf.keras.layers.Layer):
         assert(input_shape[0] == input_shape[1])
         self.d_model = input_shape[0][-1]
         self.Wt = self.add_weight(shape = (self.d_model, self.d_model), name = 'Wt')
-        self.bt = self.add_weight(shape = (1, self.d_model), name = 'bt')
+        self.bt = self.add_weight(shape = (1, self.d_model), name = 'bt', initializer = 'zeros')
         self.dropout = tf.keras.layers.Dropout(self.dropout_rate)
 
     def call(self, X, mask):
         
         (X0, X1) = X 
-        Tx = self.dropout(tf.math.multiply(tf.math.sigmoid(tf.matmul(X0, self.Wt) + self.bt), mask))
+        gate = tf.math.sigmoid(tf.matmul(X1, self.Wt) + self.bt)
+        Tx = self.dropout(gate * mask)
         return tf.math.multiply(X1, Tx) + tf.math.multiply(X0, (1.0 - Tx))
 
 #%%
@@ -407,7 +405,7 @@ class Masker(tf.keras.layers.Layer):
 
 class RepresentationLayers(tf.keras.layers.Layer):
 
-    def __init__(self, d_model, num_subwords, num_speakers, num_highway_layers,
+    def __init__(self, embedding_dim, d_model, num_subwords, num_speakers, num_highway_layers,
             transformer_layer_kwargs, embedding_dropout = 0.1, highway_dropout = 0.1,  **kwargs):
 
         super().__init__(**kwargs)
@@ -415,22 +413,24 @@ class RepresentationLayers(tf.keras.layers.Layer):
         self.num_highway_layers = num_highway_layers
         self.transformer_layer_kwargs = transformer_layer_kwargs
         self.num_speakers = num_speakers
+        self.embedding_dim = embedding_dim
         self.d_model = d_model
         self.highway_dropout = highway_dropout
         self.embedding_dropout = embedding_dropout
 
     def build(self, input_shape):
         
-        #self.word_embedder = MaskEmbedder(self.embedding_layer)
         self.mask_maker = Masker()
 
-        self.embedding_layer = tf.keras.layers.Embedding(self.num_subwords, self.d_model, mask_zero = True)
+        self.embedding_layer = tf.keras.layers.Embedding(self.num_subwords, self.embedding_dim, mask_zero = True)
 
-        self.highway_layers = [HighwayCNNLayer(7, self.highway_dropout) for i in range(self.num_highway_layers)]
+        self.highway_layers = [HighwayCNNLayer(5, self.highway_dropout) for i in range(self.num_highway_layers)]
 
-        self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers + 1, self.d_model, mask_zero = True)
+        self.speaker_embedder = tf.keras.layers.Embedding(self.num_speakers + 1, self.d_model - self.embedding_dim, mask_zero = True)
 
         self.dropout = tf.keras.layers.Dropout(self.embedding_dropout)
+
+        self.concatenator = tf.keras.layers.Concatenate(axis = -1)
 
     def call(self, X, sender, attn_precursor_mask, training = True):
 
@@ -443,9 +443,7 @@ class RepresentationLayers(tf.keras.layers.Layer):
         for highway_layer in self.highway_layers:
             X = highway_layer(X, conv_mask)
 
-        X = X * tf.math.sqrt(tf.cast(self.d_model, tf.float16))
-
-        X = X + tf.cast(self.speaker_embedder(sender), tf.float16)
+        X = self.concatenator([X, self.speaker_embedder(sender)])
 
         return X, attn_mask, conv_mask
 
@@ -454,6 +452,7 @@ class SelectiveChatbotModel(tf.keras.Model):
 
     def __init__(self,
         num_subwords = 8000, 
+        embedding_dim = 300,
         num_speakers = 2, 
         d_model = 512,
         num_encoder_layers = 4, 
@@ -465,7 +464,11 @@ class SelectiveChatbotModel(tf.keras.Model):
         **kwargs,
     ):
         super().__init__(**kwargs)
+
+        assert(embedding_dim < d_model), 'Embedding dimension must be smaller than d_model so speaker embeddings may be appended'
+
         self.num_subwords = num_subwords
+        self.embedding_dim = embedding_dim
         self.num_speakers = num_speakers
         self.num_encoder_layers = num_encoder_layers
         self.num_highway_layers = num_highway_layers
@@ -490,7 +493,7 @@ class SelectiveChatbotModel(tf.keras.Model):
         self.response_precursor_mask = tf.ones((t_r, t_r))[tf.newaxis, tf.newaxis, :, :]
         self.context_precursor_mask = tf.ones((t_c, t_c))[tf.newaxis, tf.newaxis, :, :]
          
-        self.representation_model = RepresentationLayers(self.d_model, self.num_subwords, self.num_speakers, self.num_highway_layers, 
+        self.representation_model = RepresentationLayers(self.embedding_dim, self.d_model, self.num_subwords, self.num_speakers, self.num_highway_layers, 
             self.transformer_layer_kwargs, highway_dropout = self.highway_dropout, embedding_dropout = self.embedding_dropout)
         
         self.context_encoder_layers = [EncoderLayer(**self.transformer_layer_kwargs) for _ in range(self.num_encoder_layers)]
@@ -506,7 +509,7 @@ class SelectiveChatbotModel(tf.keras.Model):
     def encode_context(self, context, sender, training = True):
 
         context, attn_mask, conv_mask = self.representation_model(context, sender, self.context_precursor_mask, training = training)
-        
+
         for encoder_layer in self.context_encoder_layers:
             context = encoder_layer(context, attn_mask, conv_mask, training = training)
 
