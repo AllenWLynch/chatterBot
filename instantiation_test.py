@@ -6,7 +6,8 @@ from selective_chatbot_estimator import ChatBotTrainer
 from pipeline import get_datafeed
 from config import DATA_DIR
 import os
-
+#%%
+tf.keras.backend.clear_session()
 
 trans_kwargs = dict(
     num_subwords=10007,
@@ -42,24 +43,26 @@ trans_layer_kwargs = dict(
 
 chatbot_model = SelectiveChatbotModel(**trans_kwargs, transformer_layer_kwargs = trans_layer_kwargs)
 
-chatbot = ChatBotTrainer(
-        chatbot_model, 
-        TransformerOptimizer(0.001, warmup_steps = 10000, step_reduction = 10))
-
-train_pipeline = get_datafeed(os.path.join(DATA_DIR, 'train_samples.csv'))
-test_pipeline = get_datafeed(os.path.join(DATA_DIR, 'test_samples.csv'))
+BATCH_SIZE = 32
+train_pipeline = get_datafeed(os.path.join(DATA_DIR, 'train_samples.csv'), batch_size= BATCH_SIZE)
+test_pipeline = get_datafeed(os.path.join(DATA_DIR, 'test_samples.csv'), batch_size= BATCH_SIZE)
 
 example = next(iter(train_pipeline))
 
-chatbot.train_step(example, 0.5)
-
-chatbot.model.summary()
+chatbot_model(example)
 
 pre_trained_embeddings = np.load('./embedding_layer_weights.npy')
 
-chatbot.model.representation_model.embedding_layer.set_weights([pre_trained_embeddings])
+chatbot_model.representation_model.embedding_layer.set_weights([pre_trained_embeddings])
 
-chatbot.fit(train_pipeline, test_pipeline,
-        epochs = 2, steps_per_epoch = 20, evaluation_steps = 20, checkpoint_every = 1,
-        logfreq = 1)
+chatbot_model.summary()
+
+chatbot = ChatBotTrainer(
+        chatbot_model, 
+        TransformerOptimizer(0.0001, warmup_steps = 10000, step_reduction = 1),
+        load_from_checkpoint=False)
+
+chatbot.fit(train_pipeline, test_pipeline, 0.5,
+        epochs = 100, steps_per_epoch = 5000, evaluation_steps = 30, checkpoint_every = 10,
+        logfreq = 50)
 

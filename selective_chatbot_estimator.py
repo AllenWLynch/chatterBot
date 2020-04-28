@@ -39,7 +39,8 @@ class ChatBotTrainer():
 
         self.checkpoint_manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=5)
 
-        self.loss_tracker = tf.keras.metrics.Mean()
+        self.training_loss_tracker = tf.keras.metrics.Mean()
+        self.all_loss_tracker = tf.keras.metrics.Mean()
 
     def __call__(self, *args, **kwargs):
         return self.model(args, **kwargs)
@@ -51,7 +52,7 @@ class ChatBotTrainer():
 
             compatibilities = self.model(X)
 
-            loss = self.model.online_batchall_triplet_loss(compatibilities, margin)
+            loss, all_loss = self.model.online_batchall_triplet_loss(compatibilities, margin)
 
             scaled_loss = self.optimizer.get_scaled_loss(loss)
 
@@ -61,7 +62,7 @@ class ChatBotTrainer():
 
         self.optimizer.apply_gradients(zip(gradients, self.model.trainable_weights))
         
-        return loss, gradients
+        return loss, gradients, all_loss
 
     @tf.function()
     def test_step(self, X, margin):
@@ -72,20 +73,23 @@ class ChatBotTrainer():
 
         return loss
     
-    def train_epoch(self, steps, dataset, log_frequency = 50, debugging = False):
+    def train_epoch(self, steps, dataset, margin, log_frequency = 50, debugging = False):
 
-        for i, (X, Y) in enumerate(dataset.take(steps)):
+        for i, X in enumerate(dataset.take(steps)):
 
             print('\rStep {}/{}'.format(str(i + 1), str(steps)), end = '')
 
-            loss, grads = self.train_step(X,Y)
+            loss, grads, all_loss = self.train_step(X, margin)
 
-            self.loss_tracker.update_state([loss])
+            self.training_loss_tracker.update_state([loss])
+            self.all_loss_tracker.update_state([all_loss])
 
             if i % log_frequency == 0:
                 with self.logger.as_default():
-                    tf.summary.scalar('Training Triplet Loss', self.loss_tracker.result(), step = self.train_steps)
-                    self.loss_tracker.reset_states()
+                    tf.summary.scalar('Training Triplet Loss', self.training_loss_tracker.result(), step = self.train_steps)
+                    tf.summary.scalar('Training Total Loss', self.all_loss_tracker.result(), step = self.train_steps)
+                self.training_loss_tracker.reset_states()
+                self.all_loss_tracker.reset_states()
 
                 if debugging:
                     weight_norms = [tf.norm(w) for w in self.model.trainable_weights]
@@ -95,26 +99,30 @@ class ChatBotTrainer():
             self.train_steps = self.train_steps + 1
         print('')
 
-    def evaluate(self, steps, dataset):
+    def evaluate(self, steps, dataset, margin):
 
         examples = []
         for i, X in enumerate(dataset.take(steps)):
 
             print('\rValidation Step {}/{}'.format(str(i+1), str(steps)), end = '')
 
-            loss = self.test_step(X)
+            loss, all_loss = self.test_step(X, margin)
 
             self.loss_tracker.update_state([loss])
-
+            self.all_loss_tracker.update_state([all_loss])
+                    
         with self.logger.as_default():
-            tf.summary.scalar('Test Triplet Loss', self.loss_tracker.result(), step = self.eval_steps)
-            self.loss_tracker.reset_states()
+            tf.summary.scalar('Test Triplet Loss', self.training_loss_tracker.result(), step = self.train_steps)
+            tf.summary.scalar('Test Total Loss', self.all_loss_tracker.result(), step = self.train_steps)
+
+        self.training_loss_tracker.reset_states()
+        self.all_loss_tracker.reset_states()
 
         print('')
         self.eval_steps = self.eval_steps + 1
 
 
-    def fit(self, train_dataset, test_dataset, inference_dataset,
+    def fit(self, train_dataset, test_dataset, margin,
                 epochs = 100, steps_per_epoch = 10000, evaluation_steps = 100, checkpoint_every = 5,
                 logfreq = 50, debugging = False):
 
@@ -122,9 +130,9 @@ class ChatBotTrainer():
         for epoch in range(epochs):
             print('\nEPOCH ', epoch + 1)
             
-            self.train_epoch(steps_per_epoch, train_dataset, logfreq, debugging= debugging)
+            self.train_epoch(steps_per_epoch, train_dataset, margin, logfreq, debugging= debugging)
 
-            self.evaluate(evaluation_steps, test_dataset)
+            self.evaluate(evaluation_steps, test_dataset, margin)
 
             if (epoch + 1) % checkpoint_every == 0:
                 self.checkpoint_manager.save()

@@ -31,10 +31,10 @@ class RelativePositionalEncoder(tf.keras.layers.Layer):
 
         assert(len(input_shape)) == 2, 'Input to positional encoder must be a Q, K'
         assert(len(input_shape[0]) == 4), 'Input matrix must be of shape (m, h, t, d)'
-        #print(input_shape)
+        
         d = input_shape[0][-1]
         embeddings_shape = (2 * self.max_relative_distance + 1, d)
-        #print(embeddings_shape)
+        
         self.embeddings = self.add_weight(shape = embeddings_shape, name = 'positional_embeddings', trainable = True)
 
         t_q = input_shape[0][-2]
@@ -335,16 +335,6 @@ class MixingAttentionLayer(EncoderLayer):
                 
         return X
 
-#%%
-'''a = np.random.rand(3, 10, 64)
-b = np.random.rand(3,1, 12, 64)
-c = np.ones((3,1, 1,1,12))
-
-m = MixingAttentionLayer(dff = 16, heads = 2, max_relative_distance= 4)
-m(a, b, c)'''
-
-#%%
-
 class HighwayLayer(tf.keras.layers.Layer):
 
     def __init__(self, highway_dropout, **kwargs):
@@ -524,19 +514,19 @@ class SelectiveChatbotModel(tf.keras.Model):
         for encoder_layer in self.response_encoder_layers:
             response = encoder_layer(response, attn_mask, conv_mask, training = training)
 
-        return response, attn_mask
+        return response, conv_mask
 
     @tf.function()
-    def calculate_compatibility(self, response_encoding, context_encoding, context_mask, training = True):
+    def calculate_compatibility(self, response_encoding, response_mask, context_encoding, context_mask, training = True):
 
         context_encoding = tf.expand_dims(context_encoding, 1)
         context_mask = tf.expand_dims(context_mask, 1)
 
         mixed_representation = self.mixer_layer(response_encoding, context_encoding, context_mask, training = True)
 
-        mixed_representation = tf.reduce_mean(mixed_representation, axis = -2)
+        ave_representation = tf.reduce_sum(mixed_representation * response_mask, axis = -2)/tf.reduce_sum(response_mask, axis = -2)
 
-        compatibility = self.output_densor(self.dense_dropout(mixed_representation, training = training))
+        compatibility = self.output_densor(self.dense_dropout(ave_representation, training = training))
 
         return tf.squeeze(compatibility, axis = -1)
 
@@ -547,9 +537,9 @@ class SelectiveChatbotModel(tf.keras.Model):
 
         context_encoding, context_mask = self.encode_context(context, sender, training = training)
 
-        response_encoding, _ = self.encode_response(response, author, training = training)
+        response_encoding, response_ave_mask = self.encode_response(response, author, training = training)
 
-        return self.calculate_compatibility(response_encoding, context_encoding, context_mask, training = training)
+        return self.calculate_compatibility(response_encoding, response_ave_mask, context_encoding, context_mask, training = training)
         
     @tf.function()
     def online_batchall_triplet_loss(self, compatibilities, margin):
@@ -568,8 +558,9 @@ class SelectiveChatbotModel(tf.keras.Model):
 
         triplet_loss = tf.maximum(ave_negative - positives + margin, 0.)
 
-        return tf.reduce_mean(triplet_loss)
+        all_loss = tf.maximum(tf.reduce_sum(compatibilities * negatives_mask, axis = -1)/(B-1.) - positives + margin, 0.)
 
+        return tf.reduce_mean(triplet_loss), tf.reduce_mean(all_loss)
 
 
 #%%
